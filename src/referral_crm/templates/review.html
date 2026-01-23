@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review Referral #{{ referral.id }} - Referral CRM</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    <style>
+        .confidence-high { background-color: #dcfce7; border-color: #22c55e; }
+        .confidence-med { background-color: #fef9c3; border-color: #eab308; }
+        .confidence-low { background-color: #fee2e2; border-color: #ef4444; }
+        .field-editable:focus { outline: 2px solid #3b82f6; }
+        .email-preview { max-height: 500px; overflow-y: auto; }
+        .attachment-preview { max-height: 400px; overflow-y: auto; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen" x-data="reviewApp()">
+    <!-- Header -->
+    <nav class="bg-blue-600 text-white p-4 shadow-lg">
+        <div class="container mx-auto flex justify-between items-center">
+            <div class="flex items-center gap-4">
+                <a href="/" class="text-white hover:text-blue-200">&larr; Back to Queue</a>
+                <h1 class="text-xl font-bold">Review Referral #{{ referral.id }}</h1>
+            </div>
+            <div class="flex gap-2">
+                <span class="px-3 py-1 rounded text-sm
+                    {% if referral.status == 'pending' %}bg-yellow-500
+                    {% elif referral.status == 'in_review' %}bg-blue-500
+                    {% elif referral.status == 'approved' %}bg-green-500
+                    {% elif referral.status == 'rejected' %}bg-red-500
+                    {% else %}bg-gray-500{% endif %}">
+                    {{ referral.status | upper }}
+                </span>
+                <span class="px-3 py-1 rounded text-sm
+                    {% if referral.priority == 'urgent' %}bg-red-600 font-bold
+                    {% elif referral.priority == 'high' %}bg-red-500
+                    {% elif referral.priority == 'medium' %}bg-yellow-500
+                    {% else %}bg-gray-500{% endif %}">
+                    {{ referral.priority | upper }}
+                </span>
+            </div>
+        </div>
+    </nav>
+
+    <main class="container mx-auto p-6">
+        <!-- Quick Actions Bar -->
+        <div class="bg-white rounded-lg shadow mb-6 p-4">
+            <div class="flex flex-wrap gap-3 items-center">
+                <span class="text-gray-600 font-medium">Quick Actions:</span>
+
+                <!-- Open in Outlook -->
+                {% if referral.email_web_link %}
+                <a href="{{ referral.email_web_link }}" target="_blank"
+                   class="inline-flex items-center gap-2 px-4 py-2 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition">
+                    <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z"></path>
+                        <path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z"></path>
+                    </svg>
+                    Open in Outlook
+                </a>
+                {% endif %}
+
+                <!-- Reply Button -->
+                <button @click="showReplyModal = true"
+                        class="inline-flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded hover:bg-green-200 transition">
+                    <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                        <path fill-rule="evenodd" d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 11-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd"></path>
+                    </svg>
+                    Reply to Adjuster
+                </button>
+
+                <!-- View Email in S3 -->
+                {% if email_html_url %}
+                <a href="{{ email_html_url }}" target="_blank"
+                   class="inline-flex items-center gap-2 px-4 py-2 bg-purple-100 text-purple-700 rounded hover:bg-purple-200 transition">
+                    <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"></path>
+                    </svg>
+                    View Stored Email
+                </a>
+                {% endif %}
+
+                <div class="flex-grow"></div>
+
+                <!-- Approve/Reject Buttons -->
+                <button @click="approveReferral()"
+                        class="inline-flex items-center gap-2 px-6 py-2 bg-green-600 text-white rounded hover:bg-green-700 transition font-medium">
+                    ✓ Approve
+                </button>
+                <button @click="showRejectModal = true"
+                        class="inline-flex items-center gap-2 px-6 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition font-medium">
+                    ✗ Reject
+                </button>
+            </div>
+        </div>
+
+        <!-- Main Content: Side by Side -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+            <!-- LEFT: Source Email & Attachments -->
+            <div class="space-y-6">
+                <!-- Email Source Panel -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="border-b px-4 py-3 flex justify-between items-center">
+                        <h2 class="text-lg font-semibold text-gray-800">Original Email</h2>
+                        {% if referral.email_web_link %}
+                        <a href="{{ referral.email_web_link }}" target="_blank"
+                           class="text-blue-600 hover:text-blue-800 text-sm">
+                            Open in Outlook &rarr;
+                        </a>
+                        {% endif %}
+                    </div>
+                    <div class="p-4">
+                        <div class="mb-3 text-sm text-gray-600">
+                            <p><strong>From:</strong> {{ referral.adjuster_email or 'Unknown' }}</p>
+                            <p><strong>Subject:</strong> {{ referral.email_subject or 'No subject' }}</p>
+                            <p><strong>Received:</strong> {{ referral.received_at.strftime('%Y-%m-%d %H:%M') if referral.received_at else 'Unknown' }}</p>
+                        </div>
+                        <div class="email-preview border rounded p-4 bg-gray-50">
+                            {% if referral.email_body_html %}
+                            <iframe srcdoc="{{ referral.email_body_html | e }}"
+                                    class="w-full h-96 border-0"
+                                    sandbox="allow-same-origin"></iframe>
+                            {% elif referral.email_body_preview %}
+                            <pre class="whitespace-pre-wrap text-sm">{{ referral.email_body_preview }}</pre>
+                            {% else %}
+                            <p class="text-gray-500 italic">No email content available</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Attachments Panel -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="border-b px-4 py-3">
+                        <h2 class="text-lg font-semibold text-gray-800">
+                            Attachments ({{ attachments | length }})
+                        </h2>
+                    </div>
+                    <div class="p-4">
+                        {% if attachments %}
+                        <div class="space-y-3">
+                            {% for att in attachments %}
+                            <div class="border rounded p-3 hover:bg-gray-50 transition">
+                                <div class="flex items-center justify-between">
+                                    <div class="flex items-center gap-3">
+                                        <!-- File type icon -->
+                                        <div class="w-10 h-10 rounded bg-gray-200 flex items-center justify-center">
+                                            {% if att.content_type and 'pdf' in att.content_type %}
+                                            <span class="text-red-600 font-bold text-xs">PDF</span>
+                                            {% elif att.content_type and 'image' in att.content_type %}
+                                            <span class="text-green-600 font-bold text-xs">IMG</span>
+                                            {% else %}
+                                            <span class="text-gray-600 font-bold text-xs">DOC</span>
+                                            {% endif %}
+                                        </div>
+                                        <div>
+                                            <p class="font-medium text-gray-800">{{ att.filename }}</p>
+                                            <p class="text-xs text-gray-500">
+                                                {{ (att.size_bytes / 1024) | round(1) }} KB
+                                                {% if att.document_type %} · {{ att.document_type }}{% endif %}
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div class="flex gap-2">
+                                        {% if att.view_url %}
+                                        <a href="{{ att.view_url }}" target="_blank"
+                                           class="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200">
+                                            View
+                                        </a>
+                                        {% endif %}
+                                        {% if att.download_url %}
+                                        <a href="{{ att.download_url }}"
+                                           class="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200">
+                                            Download
+                                        </a>
+                                        {% endif %}
+                                        {% if att.text_url %}
+                                        <a href="{{ att.text_url }}" target="_blank"
+                                           class="px-3 py-1 text-sm bg-purple-100 text-purple-700 rounded hover:bg-purple-200">
+                                            Text
+                                        </a>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                {% if att.extracted_text %}
+                                <div class="mt-2">
+                                    <button @click="showExtractedText = showExtractedText === {{ loop.index }} ? null : {{ loop.index }}"
+                                            class="text-sm text-blue-600 hover:text-blue-800">
+                                        <span x-show="showExtractedText !== {{ loop.index }}">Show extracted text</span>
+                                        <span x-show="showExtractedText === {{ loop.index }}">Hide extracted text</span>
+                                    </button>
+                                    <div x-show="showExtractedText === {{ loop.index }}" x-collapse
+                                         class="mt-2 p-2 bg-gray-100 rounded text-xs attachment-preview">
+                                        <pre class="whitespace-pre-wrap">{{ att.extracted_text[:2000] }}{% if att.extracted_text | length > 2000 %}...{% endif %}</pre>
+                                    </div>
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <p class="text-gray-500 italic">No attachments</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT: Extracted Data (Editable) -->
+            <div class="space-y-6">
+                <!-- Claimant Information -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="border-b px-4 py-3">
+                        <h2 class="text-lg font-semibold text-gray-800">Claimant Information</h2>
+                    </div>
+                    <div class="p-4 space-y-4">
+                        {{ field_row('claimant_name', 'Name', referral.claimant_name, extraction_data) }}
+                        {{ field_row('claimant_dob', 'Date of Birth', referral.claimant_dob, extraction_data) }}
+                        {{ field_row('claimant_phone', 'Phone', referral.claimant_phone, extraction_data) }}
+                        {{ field_row('claimant_address', 'Address', referral.claimant_address, extraction_data) }}
+                    </div>
+                </div>
+
+                <!-- Claim Information -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="border-b px-4 py-3">
+                        <h2 class="text-lg font-semibold text-gray-800">Claim Information</h2>
+                    </div>
+                    <div class="p-4 space-y-4">
+                        {{ field_row('carrier_name_raw', 'Insurance Carrier', referral.carrier_name_raw, extraction_data) }}
+                        {{ field_row('claim_number', 'Claim Number', referral.claim_number, extraction_data) }}
+                        {{ field_row('date_of_injury', 'Date of Injury', referral.date_of_injury, extraction_data) }}
+                        {{ field_row('body_parts', 'Body Parts', referral.body_parts, extraction_data) }}
+                        {{ field_row('service_requested', 'Service Requested', referral.service_requested, extraction_data) }}
+                        {{ field_row('authorization_number', 'Authorization #', referral.authorization_number, extraction_data) }}
+                    </div>
+                </div>
+
+                <!-- Adjuster Information -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="border-b px-4 py-3">
+                        <h2 class="text-lg font-semibold text-gray-800">Adjuster Information</h2>
+                    </div>
+                    <div class="p-4 space-y-4">
+                        {{ field_row('adjuster_name', 'Name', referral.adjuster_name, extraction_data) }}
+                        {{ field_row('adjuster_email', 'Email', referral.adjuster_email, extraction_data) }}
+                        {{ field_row('adjuster_phone', 'Phone', referral.adjuster_phone, extraction_data) }}
+                        {{ field_row('employer_name', 'Employer', referral.employer_name, extraction_data) }}
+                    </div>
+                </div>
+
+                <!-- Provider Assignment -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="border-b px-4 py-3">
+                        <h2 class="text-lg font-semibold text-gray-800">Provider Assignment</h2>
+                    </div>
+                    <div class="p-4">
+                        {% if referral.provider %}
+                        <div class="p-3 bg-green-50 rounded border border-green-200">
+                            <p class="font-medium text-green-800">{{ referral.provider.name }}</p>
+                            <p class="text-sm text-green-600">{{ referral.provider.phone }}</p>
+                            {% if referral.rate_amount %}
+                            <p class="text-sm text-green-600">Rate: ${{ "%.2f" | format(referral.rate_amount) }}</p>
+                            {% endif %}
+                        </div>
+                        {% else %}
+                        <div class="space-y-3">
+                            <p class="text-gray-500">No provider assigned</p>
+                            <button @click="showProviderModal = true"
+                                    class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
+                                Find Provider
+                            </button>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- Notes -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="border-b px-4 py-3">
+                        <h2 class="text-lg font-semibold text-gray-800">Notes</h2>
+                    </div>
+                    <div class="p-4">
+                        <textarea x-model="notes"
+                                  class="w-full p-3 border rounded focus:ring-2 focus:ring-blue-500"
+                                  rows="3"
+                                  placeholder="Add notes about this referral...">{{ referral.notes or '' }}</textarea>
+                        <button @click="saveNotes()"
+                                class="mt-2 px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
+                            Save Notes
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Audit History -->
+        <div class="mt-6 bg-white rounded-lg shadow">
+            <div class="border-b px-4 py-3">
+                <h2 class="text-lg font-semibold text-gray-800">Activity History</h2>
+            </div>
+            <div class="p-4">
+                {% if audit_logs %}
+                <div class="space-y-2">
+                    {% for log in audit_logs[:10] %}
+                    <div class="flex items-center gap-4 text-sm py-2 border-b last:border-0">
+                        <span class="text-gray-400 w-40">{{ log.timestamp.strftime('%Y-%m-%d %H:%M') }}</span>
+                        <span class="font-medium text-gray-700">{{ log.action }}</span>
+                        {% if log.field_name %}
+                        <span class="text-gray-500">{{ log.field_name }}: {{ log.old_value or '(empty)' }} → {{ log.new_value }}</span>
+                        {% endif %}
+                        <span class="text-gray-400">by {{ log.user }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-gray-500 italic">No activity recorded</p>
+                {% endif %}
+            </div>
+        </div>
+    </main>
+
+    <!-- Reply Modal -->
+    <div x-show="showReplyModal" x-cloak
+         class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4" @click.away="showReplyModal = false">
+            <div class="border-b px-6 py-4 flex justify-between items-center">
+                <h3 class="text-lg font-semibold">Reply to Adjuster</h3>
+                <button @click="showReplyModal = false" class="text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <div class="p-6">
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">To:</label>
+                    <input type="text" readonly value="{{ referral.adjuster_email }}"
+                           class="w-full p-2 border rounded bg-gray-50">
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Template:</label>
+                    <select x-model="selectedTemplate" @change="loadTemplate()"
+                            class="w-full p-2 border rounded">
+                        <option value="">-- Select a template --</option>
+                        <option value="confirmation">Referral Received</option>
+                        <option value="missing_auth">Missing Authorization</option>
+                        <option value="need_dob">Need Date of Birth</option>
+                        <option value="clarify_service">Clarify Service</option>
+                    </select>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Message:</label>
+                    <textarea x-model="replyBody" rows="8"
+                              class="w-full p-3 border rounded focus:ring-2 focus:ring-blue-500"></textarea>
+                </div>
+                <div class="flex gap-3">
+                    <a :href="getOutlookReplyUrl()" target="_blank"
+                       class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
+                        Open in Outlook
+                    </a>
+                    <button @click="showReplyModal = false"
+                            class="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reject Modal -->
+    <div x-show="showRejectModal" x-cloak
+         class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-md mx-4" @click.away="showRejectModal = false">
+            <div class="border-b px-6 py-4">
+                <h3 class="text-lg font-semibold">Reject Referral</h3>
+            </div>
+            <div class="p-6">
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Reason for rejection:</label>
+                    <textarea x-model="rejectReason" rows="4"
+                              class="w-full p-3 border rounded focus:ring-2 focus:ring-red-500"
+                              placeholder="Please provide a reason..."></textarea>
+                </div>
+                <div class="flex gap-3">
+                    <button @click="rejectReferral()"
+                            class="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700">
+                        Confirm Reject
+                    </button>
+                    <button @click="showRejectModal = false"
+                            class="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function reviewApp() {
+            return {
+                referralId: {{ referral.id }},
+                notes: '{{ referral.notes or "" | e }}',
+                showReplyModal: false,
+                showRejectModal: false,
+                showProviderModal: false,
+                showExtractedText: null,
+                selectedTemplate: '',
+                replyBody: '',
+                rejectReason: '',
+
+                loadTemplate() {
+                    const templates = {
+                        confirmation: `Hi {{ referral.adjuster_name or 'there' }},\n\nThis confirms receipt of your referral for {{ referral.claimant_name or 'the claimant' }} (Claim #{{ referral.claim_number or 'N/A' }}).\n\nWe're processing this and will have scheduling information shortly.\n\nBest regards`,
+                        missing_auth: `Hi {{ referral.adjuster_name or 'there' }},\n\nThank you for the referral for {{ referral.claimant_name or 'the claimant' }}.\n\nTo proceed with scheduling, we'll need a copy of the authorization letter. Please reply with this document attached.\n\nBest regards`,
+                        need_dob: `Hi {{ referral.adjuster_name or 'there' }},\n\nWe're processing the referral for {{ referral.claimant_name or 'the claimant' }}.\n\nWe need the claimant's date of birth to proceed. Could you please provide this?\n\nBest regards`,
+                        clarify_service: `Hi {{ referral.adjuster_name or 'there' }},\n\nThank you for the referral for {{ referral.claimant_name or 'the claimant' }}.\n\nCould you please clarify the specific service being requested?\n\nBest regards`
+                    };
+                    this.replyBody = templates[this.selectedTemplate] || '';
+                },
+
+                getOutlookReplyUrl() {
+                    const subject = encodeURIComponent('RE: {{ referral.email_subject or "Referral" | e }}');
+                    const body = encodeURIComponent(this.replyBody);
+                    const to = '{{ referral.adjuster_email | e }}';
+                    return `https://outlook.office.com/mail/deeplink/compose?to=${to}&subject=${subject}&body=${body}`;
+                },
+
+                async approveReferral() {
+                    if (!confirm('Approve this referral?')) return;
+                    try {
+                        const resp = await fetch(`/api/referrals/${this.referralId}/approve`, {method: 'POST'});
+                        if (resp.ok) {
+                            window.location.reload();
+                        } else {
+                            alert('Failed to approve referral');
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                },
+
+                async rejectReferral() {
+                    if (!this.rejectReason.trim()) {
+                        alert('Please provide a rejection reason');
+                        return;
+                    }
+                    try {
+                        const resp = await fetch(`/api/referrals/${this.referralId}/reject?reason=${encodeURIComponent(this.rejectReason)}`, {method: 'POST'});
+                        if (resp.ok) {
+                            window.location.reload();
+                        } else {
+                            alert('Failed to reject referral');
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                },
+
+                async saveNotes() {
+                    try {
+                        const resp = await fetch(`/api/referrals/${this.referralId}`, {
+                            method: 'PATCH',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({notes: this.notes})
+                        });
+                        if (resp.ok) {
+                            alert('Notes saved');
+                        } else {
+                            alert('Failed to save notes');
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                },
+
+                async updateField(field, value) {
+                    try {
+                        const resp = await fetch(`/api/referrals/${this.referralId}`, {
+                            method: 'PATCH',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({[field]: value})
+                        });
+                        if (!resp.ok) {
+                            alert('Failed to update field');
+                        }
+                    } catch (e) {
+                        console.error('Update error:', e);
+                    }
+                }
+            }
+        }
+    </script>
+
+    {% macro field_row(field_name, label, value, extraction_data) %}
+    {% set confidence = extraction_data.get(field_name, {}).get('confidence', 0) if extraction_data else 0 %}
+    {% set conf_class = 'confidence-high' if confidence >= 90 else ('confidence-med' if confidence >= 70 else 'confidence-low') %}
+    <div class="flex items-center gap-4">
+        <label class="w-32 text-sm font-medium text-gray-600">{{ label }}:</label>
+        <input type="text"
+               value="{{ value or '' }}"
+               @change="updateField('{{ field_name }}', $event.target.value)"
+               class="flex-1 p-2 border rounded field-editable {{ conf_class if confidence > 0 else '' }}">
+        {% if confidence > 0 %}
+        <span class="text-xs px-2 py-1 rounded {{ conf_class }}" title="LLM confidence score">
+            {{ confidence }}%
+        </span>
+        {% endif %}
+    </div>
+    {% endmacro %}
+</body>
+</html>
