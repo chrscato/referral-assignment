@@ -2,6 +2,8 @@
 Provider service for managing providers and rate lookup.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Optional
 

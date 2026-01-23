@@ -17,6 +17,22 @@
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen" x-data="reviewApp()">
+    {% macro field_row(field_name, label, value, extraction_data) %}
+    {% set confidence = extraction_data.get(field_name, {}).get('confidence', 0) if extraction_data else 0 %}
+    {% set conf_class = 'confidence-high' if confidence >= 90 else ('confidence-med' if confidence >= 70 else 'confidence-low') %}
+    <div class="flex items-center gap-4">
+        <label class="w-32 text-sm font-medium text-gray-600">{{ label }}:</label>
+        <input type="text"
+               value="{{ value or '' }}"
+               @change="updateField('{{ field_name }}', $event.target.value)"
+               class="flex-1 p-2 border rounded field-editable {{ conf_class if confidence > 0 else '' }}">
+        {% if confidence > 0 %}
+        <span class="text-xs px-2 py-1 rounded {{ conf_class }}" title="LLM confidence score">
+            {{ confidence }}%
+        </span>
+        {% endif %}
+    </div>
+    {% endmacro %}
     <!-- Header -->
     <nav class="bg-blue-600 text-white p-4 shadow-lg">
         <div class="container mx-auto flex justify-between items-center">
@@ -490,21 +506,5 @@
         }
     </script>
 
-    {% macro field_row(field_name, label, value, extraction_data) %}
-    {% set confidence = extraction_data.get(field_name, {}).get('confidence', 0) if extraction_data else 0 %}
-    {% set conf_class = 'confidence-high' if confidence >= 90 else ('confidence-med' if confidence >= 70 else 'confidence-low') %}
-    <div class="flex items-center gap-4">
-        <label class="w-32 text-sm font-medium text-gray-600">{{ label }}:</label>
-        <input type="text"
-               value="{{ value or '' }}"
-               @change="updateField('{{ field_name }}', $event.target.value)"
-               class="flex-1 p-2 border rounded field-editable {{ conf_class if confidence > 0 else '' }}">
-        {% if confidence > 0 %}
-        <span class="text-xs px-2 py-1 rounded {{ conf_class }}" title="LLM confidence score">
-            {{ confidence }}%
-        </span>
-        {% endif %}
-    </div>
-    {% endmacro %}
 </body>
 </html>

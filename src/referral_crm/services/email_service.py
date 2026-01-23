@@ -3,6 +3,8 @@ Email service for Microsoft Graph API integration.
 Handles email fetching, replies, and forwarding.
 """
 
+from __future__ import annotations
+
 import base64
 from dataclasses import dataclass
 from datetime import datetime
@@ -104,9 +106,9 @@ class EmailService:
     def is_configured(self) -> bool:
         """Check if Microsoft Graph API is configured."""
         return bool(
-            self.settings.ms_client_id
-            and self.settings.ms_client_secret
-            and self.settings.ms_tenant_id
+            self.settings.graph_client_id
+            and self.settings.graph_client_secret
+            and self.settings.graph_tenant_id
         )
 
     def get_access_token(self) -> str:
@@ -122,9 +124,9 @@ class EmailService:
         # Get new token using client credentials flow
         msal_lib = get_msal()
         app = msal_lib.ConfidentialClientApplication(
-            self.settings.ms_client_id,
-            authority=f"https://login.microsoftonline.com/{self.settings.ms_tenant_id}",
-            client_credential=self.settings.ms_client_secret,
+            self.settings.graph_client_id,
+            authority=f"https://login.microsoftonline.com/{self.settings.graph_tenant_id}",
+            client_credential=self.settings.graph_client_secret,
         )
 
         result = app.acquire_token_for_client(
@@ -302,6 +304,209 @@ class EmailService:
             data = response.json()
 
         return data.get("unreadItemCount", 0)
+
+    def _get_user_endpoint(self, mailbox: Optional[str] = None) -> str:
+        """Get the user endpoint - either /me or /users/{mailbox}."""
+        if mailbox:
+            return f"{self.GRAPH_BASE_URL}/users/{mailbox}"
+        return f"{self.GRAPH_BASE_URL}/me"
+
+    def get_folder_id(
+        self,
+        folder_path: str,
+        mailbox: Optional[str] = None,
+    ) -> str:
+        """
+        Get the folder ID for a nested folder path like 'Inbox/Assigned'.
+
+        Args:
+            folder_path: Folder path with '/' separator (e.g., 'Inbox/Assigned')
+            mailbox: Optional shared mailbox email address
+
+        Returns:
+            The folder ID
+        """
+        base_url = self._get_user_endpoint(mailbox)
+        parts = folder_path.split("/")
+
+        # Start with the root folder
+        current_folder_id = parts[0]
+
+        with httpx.Client() as client:
+            # If there are subfolders, navigate to them
+            for subfolder_name in parts[1:]:
+                # Get child folders of current folder
+                url = f"{base_url}/mailFolders/{current_folder_id}/childFolders"
+                response = client.get(url, headers=self._get_headers())
+                response.raise_for_status()
+                data = response.json()
+
+                # Find the subfolder by name
+                found = False
+                for folder in data.get("value", []):
+                    if folder.get("displayName", "").lower() == subfolder_name.lower():
+                        current_folder_id = folder["id"]
+                        found = True
+                        break
+
+                if not found:
+                    raise ValueError(f"Folder not found: {subfolder_name} in {folder_path}")
+
+        return current_folder_id
+
+    def list_messages_from_shared_mailbox(
+        self,
+        mailbox: str,
+        folder_path: str = "Inbox",
+        top: int = 50,
+        skip: int = 0,
+        filter_query: Optional[str] = None,
+        order_by: str = "receivedDateTime desc",
+    ) -> list[EmailMessage]:
+        """
+        List messages from a shared mailbox folder.
+
+        Args:
+            mailbox: Shared mailbox email address
+            folder_path: Mail folder path (e.g., 'Inbox' or 'Inbox/Assigned')
+            top: Number of messages to return
+            skip: Number of messages to skip
+            filter_query: OData filter query
+            order_by: OData orderby clause
+
+        Returns:
+            List of EmailMessage objects
+        """
+        base_url = self._get_user_endpoint(mailbox)
+        folder_id = self.get_folder_id(folder_path, mailbox)
+
+        url = f"{base_url}/mailFolders/{folder_id}/messages"
+        params = {
+            "$top": top,
+            "$skip": skip,
+            "$orderby": order_by,
+            "$select": "id,subject,body,bodyPreview,from,receivedDateTime,webLink,internetMessageId,conversationId,hasAttachments",
+        }
+        if filter_query:
+            params["$filter"] = filter_query
+
+        with httpx.Client() as client:
+            response = client.get(url, headers=self._get_headers(), params=params)
+            response.raise_for_status()
+            data = response.json()
+
+        messages = []
+        for msg_data in data.get("value", []):
+            messages.append(EmailMessage.from_graph_response(msg_data))
+
+        return messages
+
+    def get_conversation_messages(
+        self,
+        conversation_id: str,
+        mailbox: Optional[str] = None,
+        folder_path: str = "Inbox",
+    ) -> list[EmailMessage]:
+        """
+        Get all messages in a conversation thread.
+
+        Args:
+            conversation_id: The conversation ID to fetch
+            mailbox: Optional shared mailbox email address
+            folder_path: Mail folder path to search in
+
+        Returns:
+            List of EmailMessage objects in the conversation, ordered by date (oldest first)
+        """
+        base_url = self._get_user_endpoint(mailbox)
+        folder_id = self.get_folder_id(folder_path, mailbox)
+
+        url = f"{base_url}/mailFolders/{folder_id}/messages"
+        params = {
+            "$filter": f"conversationId eq '{conversation_id}'",
+            "$orderby": "receivedDateTime asc",
+            "$select": "id,subject,body,bodyPreview,from,receivedDateTime,webLink,internetMessageId,conversationId,hasAttachments",
+        }
+
+        with httpx.Client() as client:
+            response = client.get(url, headers=self._get_headers(), params=params)
+            response.raise_for_status()
+            data = response.json()
+
+        messages = []
+        for msg_data in data.get("value", []):
+            messages.append(EmailMessage.from_graph_response(msg_data))
+
+        return messages
+
+    def get_first_message_in_chain(
+        self,
+        message: EmailMessage,
+        mailbox: Optional[str] = None,
+        folder_path: str = "Inbox",
+    ) -> EmailMessage:
+        """
+        Get the first (oldest) message in an email chain.
+
+        Args:
+            message: Any message in the conversation
+            mailbox: Optional shared mailbox email address
+            folder_path: Mail folder path to search in
+
+        Returns:
+            The first EmailMessage in the conversation thread
+        """
+        messages = self.get_conversation_messages(
+            message.conversation_id,
+            mailbox=mailbox,
+            folder_path=folder_path,
+        )
+
+        if not messages:
+            return message
+
+        # Return the oldest message (first in the list since ordered by date asc)
+        return messages[0]
+
+    def get_message_from_shared_mailbox(
+        self,
+        message_id: str,
+        mailbox: str,
+    ) -> EmailMessage:
+        """Get a specific message by ID from a shared mailbox."""
+        base_url = self._get_user_endpoint(mailbox)
+        url = f"{base_url}/messages/{message_id}"
+        params = {
+            "$select": "id,subject,body,bodyPreview,from,receivedDateTime,webLink,internetMessageId,conversationId,hasAttachments"
+        }
+
+        with httpx.Client() as client:
+            response = client.get(url, headers=self._get_headers(), params=params)
+            response.raise_for_status()
+            data = response.json()
+
+        return EmailMessage.from_graph_response(data)
+
+    def get_attachments_from_shared_mailbox(
+        self,
+        message_id: str,
+        mailbox: str,
+    ) -> list[EmailAttachment]:
+        """Get attachments for a message from a shared mailbox."""
+        base_url = self._get_user_endpoint(mailbox)
+        url = f"{base_url}/messages/{message_id}/attachments"
+
+        with httpx.Client() as client:
+            response = client.get(url, headers=self._get_headers())
+            response.raise_for_status()
+            data = response.json()
+
+        attachments = []
+        for att_data in data.get("value", []):
+            if att_data.get("@odata.type") == "#microsoft.graph.fileAttachment":
+                attachments.append(EmailAttachment.from_graph_response(att_data))
+
+        return attachments
 
 
 class EmailTemplateService:

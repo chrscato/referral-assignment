@@ -23,9 +23,11 @@ class Settings(BaseSettings):
     database_echo: bool = False
 
     # Microsoft Graph API (for email integration)
-    ms_client_id: Optional[str] = None
-    ms_client_secret: Optional[str] = None
-    ms_tenant_id: Optional[str] = None
+    graph_client_id: Optional[str] = None
+    graph_client_secret: Optional[str] = None
+    graph_tenant_id: Optional[str] = None
+    shared_mailbox: Optional[str] = None
+    graph_mailbox: Optional[str] = None
     ms_redirect_uri: str = "http://localhost:8000/auth/callback"
 
     # Claude API (for LLM extraction)

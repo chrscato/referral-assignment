@@ -49,7 +49,7 @@ def show_status():
     console.print(Panel.fit(
         f"[bold]Referral CRM[/bold]\n"
         f"Database: {settings.get_db_path()}\n"
-        f"Graph API: {'[green]Configured[/green]' if settings.ms_client_id else '[yellow]Not configured[/yellow]'}\n"
+        f"Graph API: {'[green]Configured[/green]' if settings.graph_client_id else '[yellow]Not configured[/yellow]'}\n"
         f"Claude API: {'[green]Configured[/green]' if settings.anthropic_api_key else '[yellow]Not configured[/yellow]'}",
         title="System Status",
         border_style="blue",
@@ -547,6 +547,434 @@ def find_providers(
 # ============================================================================
 import_app = typer.Typer(help="Import data from files")
 app.add_typer(import_app, name="import")
+
+
+@import_app.command("sample-email")
+def import_sample_email(
+    folder: str = typer.Option("Inbox/Assigned", "--folder", "-f", help="Folder path to pull from"),
+):
+    """Pull sample email data from the shared mailbox (first email in a chain)."""
+    from referral_crm.services.email_service import EmailService
+
+    settings = get_settings()
+
+    if not settings.shared_mailbox:
+        console.print("[red]SHARED_MAILBOX environment variable not set.[/red]")
+        console.print("[dim]Set it in your .env file or environment.[/dim]")
+        raise typer.Exit(1)
+
+    email_service = EmailService()
+
+    if not email_service.is_configured():
+        console.print("[red]Microsoft Graph API not configured.[/red]")
+        console.print("[dim]Set GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET, and GRAPH_TENANT_ID.[/dim]")
+        raise typer.Exit(1)
+
+    console.print(f"[blue]Fetching from:[/blue] {settings.shared_mailbox}")
+    console.print(f"[blue]Folder:[/blue] {folder}")
+    console.print()
+
+    with console.status("Fetching emails..."):
+        try:
+            messages = email_service.list_messages_from_shared_mailbox(
+                mailbox=settings.shared_mailbox,
+                folder_path=folder,
+                top=1,
+            )
+        except Exception as e:
+            console.print(f"[red]Error fetching emails: {e}[/red]")
+            raise typer.Exit(1)
+
+    if not messages:
+        console.print("[yellow]No messages found in folder.[/yellow]")
+        raise typer.Exit(0)
+
+    # Get the first email in the chain
+    message = messages[0]
+    console.print(f"[dim]Found message: {message.subject}[/dim]")
+
+    with console.status("Finding first message in chain..."):
+        try:
+            first_message = email_service.get_first_message_in_chain(
+                message,
+                mailbox=settings.shared_mailbox,
+                folder_path=folder,
+            )
+        except Exception as e:
+            console.print(f"[yellow]Could not get chain, using current message: {e}[/yellow]")
+            first_message = message
+
+    # Display the email
+    console.print()
+    console.print(Panel.fit(
+        f"[bold]{first_message.subject}[/bold]",
+        title="First Email in Chain",
+        border_style="green",
+    ))
+
+    console.print(f"[cyan]From:[/cyan] {first_message.from_name} <{first_message.from_email}>")
+    console.print(f"[cyan]Date:[/cyan] {first_message.received_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+    console.print(f"[cyan]Has Attachments:[/cyan] {'Yes' if first_message.has_attachments else 'No'}")
+    console.print()
+
+    # Show body preview
+    console.print("[cyan]Body Preview:[/cyan]")
+    console.print(Panel(
+        first_message.body_preview[:500] + ("..." if len(first_message.body_preview) > 500 else ""),
+        border_style="dim",
+    ))
+
+    # Fetch attachments if present
+    if first_message.has_attachments:
+        console.print()
+        with console.status("Fetching attachments..."):
+            try:
+                attachments = email_service.get_attachments_from_shared_mailbox(
+                    first_message.id,
+                    settings.shared_mailbox,
+                )
+                console.print(f"[cyan]Attachments ({len(attachments)}):[/cyan]")
+                for att in attachments:
+                    size_kb = att.size / 1024
+                    console.print(f"  - {att.name} ({size_kb:.1f} KB, {att.content_type})")
+            except Exception as e:
+                console.print(f"[yellow]Could not fetch attachments: {e}[/yellow]")
+
+    console.print()
+    console.print(f"[dim]Message ID: {first_message.id}[/dim]")
+    console.print(f"[dim]Conversation ID: {first_message.conversation_id}[/dim]")
+
+
+@import_app.command("sample-referral")
+def import_sample_referral(
+    folder: str = typer.Option("Inbox/Assigned", "--folder", "-f", help="Folder path to pull from"),
+    use_llm: bool = typer.Option(True, "--llm/--no-llm", help="Use LLM for extraction"),
+    skip_attachments: bool = typer.Option(False, "--skip-attachments", help="Skip downloading attachments"),
+    force: bool = typer.Option(False, "--force", help="Skip duplicate check and create anyway"),
+):
+    """Fetch a sample email from shared mailbox and create a referral in the database."""
+    from pathlib import Path
+    from referral_crm.services.email_service import EmailService, EmailMessage
+    from referral_crm.services.referral_service import ReferralService, CarrierService
+
+    settings = get_settings()
+
+    # Validate configuration
+    if not settings.shared_mailbox:
+        console.print("[red]SHARED_MAILBOX environment variable not set.[/red]")
+        raise typer.Exit(1)
+
+    email_service = EmailService()
+    if not email_service.is_configured():
+        console.print("[red]Microsoft Graph API not configured.[/red]")
+        raise typer.Exit(1)
+
+    console.print(Panel.fit(
+        "[bold]Sample Referral Import[/bold]\n"
+        f"Mailbox: {settings.shared_mailbox}\n"
+        f"Folder: {folder}\n"
+        f"LLM Extraction: {'Yes' if use_llm else 'No'}",
+        border_style="blue",
+    ))
+    console.print()
+
+    # Step 1: Fetch email
+    with console.status("[bold blue]Step 1/4:[/bold blue] Fetching email from shared mailbox..."):
+        try:
+            messages = email_service.list_messages_from_shared_mailbox(
+                mailbox=settings.shared_mailbox,
+                folder_path=folder,
+                top=1,
+            )
+        except Exception as e:
+            console.print(f"[red]Error fetching emails: {e}[/red]")
+            raise typer.Exit(1)
+
+    if not messages:
+        console.print("[yellow]No messages found in folder.[/yellow]")
+        raise typer.Exit(0)
+
+    message = messages[0]
+    console.print(f"[green]OK[/green] Found: {message.subject[:60]}...")
+
+    # Step 2: Check if already processed
+    with session_scope() as session:
+        referral_service = ReferralService(session)
+        carrier_service = CarrierService(session)
+
+        existing = referral_service.get_by_email_id(message.id)
+        if existing:
+            console.print(f"[yellow]! Email already processed as Referral #{existing.id}[/yellow]")
+            if not force and not Confirm.ask("Create a duplicate referral anyway?"):
+                raise typer.Exit(0)
+            # Clear the email_id to allow duplicate
+            message_id_for_db = None
+        else:
+            message_id_for_db = message.id
+
+        # Step 3: Extract data with LLM (optional)
+        extraction_data = {}
+        if use_llm:
+            with console.status("[bold blue]Step 2/4:[/bold blue] Extracting data with LLM..."):
+                try:
+                    from referral_crm.services.extraction_service import ExtractionService
+                    extraction_service = ExtractionService()
+
+                    # Get attachment texts for better extraction
+                    attachment_texts = []
+                    if message.has_attachments and not skip_attachments:
+                        try:
+                            from referral_crm.services.extraction_service import extract_text_from_pdf
+                            attachments = email_service.get_attachments_from_shared_mailbox(
+                                message.id,
+                                settings.shared_mailbox,
+                            )
+                            for att in attachments:
+                                if att.content_bytes and att.name.lower().endswith('.pdf'):
+                                    # Save temp and extract
+                                    temp_path = Path(settings.attachments_dir) / "temp" / att.name
+                                    temp_path.parent.mkdir(parents=True, exist_ok=True)
+                                    temp_path.write_bytes(att.content_bytes)
+                                    text = extract_text_from_pdf(str(temp_path))
+                                    if text:
+                                        attachment_texts.append(text)
+                                    temp_path.unlink(missing_ok=True)
+                        except Exception as e:
+                            console.print(f"[yellow]  Warning extracting attachments: {e}[/yellow]")
+
+                    result = extraction_service.extract_from_email(
+                        from_email=message.from_email,
+                        subject=message.subject,
+                        body=message.body_content,
+                        attachment_texts=attachment_texts,
+                    )
+                    extraction_data = result.to_dict()
+                    console.print("[green]OK[/green] LLM extraction complete")
+                except Exception as e:
+                    console.print(f"[yellow]! LLM extraction failed: {e}[/yellow]")
+                    console.print("[dim]  Continuing without extraction...[/dim]")
+        else:
+            console.print("[dim]Step 2/4: Skipping LLM extraction[/dim]")
+
+        # Step 4: Create referral
+        with console.status("[bold blue]Step 3/4:[/bold blue] Creating referral in database..."):
+            # Helper to get extracted values
+            def get_value(field: str) -> Optional[str]:
+                if field in extraction_data and extraction_data[field]:
+                    return extraction_data[field].get("value")
+                return None
+
+            # Find or create carrier
+            carrier_id = None
+            carrier_name_raw = get_value("insurance_carrier")
+            if carrier_name_raw:
+                carrier = carrier_service.find_or_create(carrier_name_raw)
+                carrier_id = carrier.id
+
+            # Parse dates
+            claimant_dob = None
+            date_of_injury = None
+            try:
+                if get_value("claimant_dob"):
+                    claimant_dob = datetime.strptime(get_value("claimant_dob"), "%Y-%m-%d")
+                if get_value("date_of_injury"):
+                    date_of_injury = datetime.strptime(get_value("date_of_injury"), "%Y-%m-%d")
+            except ValueError:
+                pass
+
+            # Determine priority
+            priority = Priority.MEDIUM
+            if get_value("priority"):
+                try:
+                    priority = Priority(get_value("priority"))
+                except ValueError:
+                    pass
+
+            # Create the referral
+            referral = referral_service.create(
+                # Email metadata
+                email_id=message_id_for_db,
+                email_internet_message_id=message.internet_message_id,
+                email_web_link=message.web_link,
+                email_conversation_id=message.conversation_id,
+                email_subject=message.subject,
+                email_body_preview=message.body_preview,
+                email_body_html=message.body_content,
+                received_at=message.received_datetime,
+                # Adjuster info
+                adjuster_name=get_value("adjuster_name"),
+                adjuster_email=message.from_email,
+                adjuster_phone=get_value("adjuster_phone"),
+                # Carrier
+                carrier_id=carrier_id,
+                carrier_name_raw=carrier_name_raw,
+                # Claim info
+                claim_number=get_value("claim_number"),
+                # Claimant info
+                claimant_name=get_value("claimant_name"),
+                claimant_dob=claimant_dob,
+                claimant_phone=get_value("claimant_phone"),
+                claimant_address=get_value("claimant_address"),
+                # Employer
+                employer_name=get_value("employer_name"),
+                # Injury/Service
+                date_of_injury=date_of_injury,
+                body_parts=get_value("body_parts"),
+                service_requested=get_value("service_requested"),
+                authorization_number=get_value("authorization_number"),
+                # Priority (status defaults to PENDING in create())
+                priority=priority,
+                # Extraction metadata
+                extraction_data=extraction_data if extraction_data else None,
+                extraction_timestamp=datetime.utcnow() if extraction_data else None,
+            )
+            console.print(f"[green]OK[/green] Created Referral #{referral.id}")
+
+            # Upload email to S3 if configured
+            from referral_crm.services.storage_service import get_storage_service
+            storage = get_storage_service()
+            if storage.is_configured():
+                try:
+                    email_metadata = {
+                        "id": message.id,
+                        "subject": message.subject,
+                        "from_email": message.from_email,
+                        "from_name": message.from_name,
+                        "received_datetime": message.received_datetime.isoformat(),
+                        "conversation_id": message.conversation_id,
+                    }
+                    s3_result = storage.upload_email(
+                        referral.id,
+                        email_html=message.body_content,
+                        email_metadata=email_metadata,
+                    )
+                    # Update referral with S3 key
+                    referral_service.update(
+                        referral.id,
+                        user="sample-import",
+                        s3_email_key=s3_result.get("email_html_key"),
+                    )
+                    console.print(f"[green]OK[/green] Uploaded email to S3")
+                except Exception as e:
+                    console.print(f"[yellow]! S3 email upload failed: {e}[/yellow]")
+
+        # Step 5: Save attachments (local + S3)
+        if message.has_attachments and not skip_attachments:
+            with console.status("[bold blue]Step 4/4:[/bold blue] Downloading attachments..."):
+                try:
+                    from referral_crm.services.storage_service import get_storage_service
+
+                    attachments = email_service.get_attachments_from_shared_mailbox(
+                        message.id,
+                        settings.shared_mailbox,
+                    )
+                    attachments_dir = Path(settings.attachments_dir) / str(referral.id)
+                    attachments_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Check if S3 is configured
+                    storage = get_storage_service()
+                    s3_enabled = storage.is_configured()
+                    if s3_enabled:
+                        console.print(f"[dim]  S3 bucket: {storage.bucket}[/dim]")
+
+                    saved_count = 0
+                    s3_count = 0
+                    for att in attachments:
+                        if att.content_bytes:
+                            # Save locally
+                            filepath = attachments_dir / att.name
+                            filepath.write_bytes(att.content_bytes)
+
+                            # Upload to S3 if configured
+                            s3_key = None
+                            s3_url = None
+                            if s3_enabled:
+                                try:
+                                    s3_result = storage.upload_attachment(
+                                        referral_id=referral.id,
+                                        filename=att.name,
+                                        content=att.content_bytes,
+                                        content_type=att.content_type,
+                                    )
+                                    s3_key = s3_result.get("s3_key")
+                                    # Generate a presigned URL (1 hour expiry)
+                                    s3_url = storage.get_attachment_url(
+                                        referral.id,
+                                        att.name,
+                                        expires_in=3600,
+                                    )
+                                    s3_count += 1
+                                except Exception as e:
+                                    console.print(f"[yellow]  S3 upload failed for {att.name}: {e}[/yellow]")
+
+                            # Add to database
+                            referral_service.add_attachment(
+                                referral_id=referral.id,
+                                filename=att.name,
+                                content_type=att.content_type,
+                                size_bytes=att.size,
+                                storage_path=str(filepath),
+                                graph_attachment_id=att.id,
+                                s3_key=s3_key,
+                            )
+                            saved_count += 1
+
+                    console.print(f"[green]OK[/green] Saved {saved_count} attachment(s) locally")
+                    if s3_enabled:
+                        console.print(f"[green]OK[/green] Uploaded {s3_count} attachment(s) to S3")
+                except Exception as e:
+                    console.print(f"[yellow]! Error saving attachments: {e}[/yellow]")
+        else:
+            console.print("[dim]Step 4/4: Skipping attachments[/dim]")
+
+        # Save data needed for summary before session closes
+        referral_id = referral.id
+        referral_claimant_name = referral.claimant_name
+        referral_claim_number = referral.claim_number
+        referral_service_requested = referral.service_requested
+        referral_priority = referral.priority.value
+        referral_status = referral.status.value
+
+    # Summary (outside session context)
+    console.print()
+
+    # Check S3 status for summary
+    from referral_crm.services.storage_service import get_storage_service
+    storage = get_storage_service()
+    s3_status = "[green]Enabled[/green]" if storage.is_configured() else "[yellow]Not configured[/yellow]"
+
+    console.print(Panel.fit(
+        f"[bold green]Referral #{referral_id} created successfully![/bold green]\n\n"
+        f"Claimant: {referral_claimant_name or 'Unknown'}\n"
+        f"Claim #: {referral_claim_number or 'Unknown'}\n"
+        f"Carrier: {carrier_name_raw or 'Unknown'}\n"
+        f"Service: {referral_service_requested or 'Unknown'}\n"
+        f"Priority: {referral_priority.upper()}\n"
+        f"Status: {referral_status}\n"
+        f"S3 Storage: {s3_status}",
+        title="Summary",
+        border_style="green",
+    ))
+
+    # Show S3 URLs if available
+    if storage.is_configured():
+        console.print()
+        console.print("[cyan]S3 Access URLs:[/cyan]")
+        email_url = storage.get_email_html_url(referral_id, expires_in=3600)
+        if email_url:
+            console.print(f"  Email: {email_url[:80]}...")
+
+        # List attachment URLs
+        s3_attachments = storage.list_attachments(referral_id)
+        for att in s3_attachments[:3]:  # Show first 3
+            url = storage.get_attachment_url(referral_id, att["filename"], expires_in=3600)
+            if url:
+                console.print(f"  {att['filename']}: {url[:60]}...")
+        if len(s3_attachments) > 3:
+            console.print(f"  [dim]... and {len(s3_attachments) - 3} more[/dim]")
+
+    console.print()
+    console.print(f"[dim]View details: uv run python run.py cli referral show {referral_id}[/dim]")
 
 
 @import_app.command("demo-data")

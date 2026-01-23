@@ -2,6 +2,8 @@
 Referral service - Core CRUD operations and business logic.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Optional
 
