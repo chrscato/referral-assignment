@@ -3,6 +3,8 @@
 .venv/
 venv/
 env/
+nul
+attachments/
 
 # Python
 __pycache__/
