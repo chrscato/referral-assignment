@@ -156,6 +156,7 @@ class EmailService:
         skip: int = 0,
         filter_query: Optional[str] = None,
         order_by: str = "receivedDateTime desc",
+        mailbox: Optional[str] = None,
     ) -> list[EmailMessage]:
         """
         List messages from a mail folder.
@@ -170,7 +171,12 @@ class EmailService:
         Returns:
             List of EmailMessage objects
         """
-        url = f"{self.GRAPH_BASE_URL}/me/mailFolders/{folder}/messages"
+        mailbox = mailbox or self.settings.shared_mailbox or self.settings.graph_mailbox
+        folder_id = folder
+        if "/" in folder:
+            folder_id = self.get_folder_id(folder, mailbox)
+        base_url = self._get_user_endpoint(mailbox)
+        url = f"{base_url}/mailFolders/{folder_id}/messages"
         params = {
             "$top": top,
             "$skip": skip,
@@ -191,9 +197,11 @@ class EmailService:
 
         return messages
 
-    def get_message(self, message_id: str) -> EmailMessage:
+    def get_message(self, message_id: str, mailbox: Optional[str] = None) -> EmailMessage:
         """Get a specific message by ID."""
-        url = f"{self.GRAPH_BASE_URL}/me/messages/{message_id}"
+        mailbox = mailbox or self.settings.shared_mailbox or self.settings.graph_mailbox
+        base_url = self._get_user_endpoint(mailbox)
+        url = f"{base_url}/messages/{message_id}"
         params = {
             "$select": "id,subject,body,bodyPreview,from,receivedDateTime,webLink,internetMessageId,conversationId,hasAttachments"
         }
@@ -205,9 +213,11 @@ class EmailService:
 
         return EmailMessage.from_graph_response(data)
 
-    def get_attachments(self, message_id: str) -> list[EmailAttachment]:
+    def get_attachments(self, message_id: str, mailbox: Optional[str] = None) -> list[EmailAttachment]:
         """Get attachments for a message."""
-        url = f"{self.GRAPH_BASE_URL}/me/messages/{message_id}/attachments"
+        mailbox = mailbox or self.settings.shared_mailbox or self.settings.graph_mailbox
+        base_url = self._get_user_endpoint(mailbox)
+        url = f"{base_url}/messages/{message_id}/attachments"
 
         with httpx.Client() as client:
             response = client.get(url, headers=self._get_headers())
@@ -285,9 +295,16 @@ class EmailService:
             response = client.post(url, headers=self._get_headers(), json=payload)
             response.raise_for_status()
 
-    def mark_as_read(self, message_id: str, is_read: bool = True) -> None:
+    def mark_as_read(
+        self,
+        message_id: str,
+        is_read: bool = True,
+        mailbox: Optional[str] = None,
+    ) -> None:
         """Mark a message as read or unread."""
-        url = f"{self.GRAPH_BASE_URL}/me/messages/{message_id}"
+        mailbox = mailbox or self.settings.shared_mailbox or self.settings.graph_mailbox
+        base_url = self._get_user_endpoint(mailbox)
+        url = f"{base_url}/messages/{message_id}"
         payload = {"isRead": is_read}
 
         with httpx.Client() as client:

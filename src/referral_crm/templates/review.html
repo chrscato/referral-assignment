@@ -8,6 +8,7 @@
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <style>
+        [x-cloak] { display: none !important; }
         .confidence-high { background-color: #dcfce7; border-color: #22c55e; }
         .confidence-med { background-color: #fef9c3; border-color: #eab308; }
         .confidence-low { background-color: #fee2e2; border-color: #ef4444; }
@@ -33,42 +34,67 @@
         {% endif %}
     </div>
     {% endmacro %}
+
     <!-- Header -->
     <nav class="bg-blue-600 text-white p-4 shadow-lg">
         <div class="container mx-auto flex justify-between items-center">
             <div class="flex items-center gap-4">
-                <a href="/" class="text-white hover:text-blue-200">&larr; Back to Queue</a>
+                <a :href="queueItemId ? '/intake?user=' + currentUser : '/'"
+                   class="text-white hover:text-blue-200">&larr; Back to Queue</a>
                 <h1 class="text-xl font-bold">Review Referral #{{ referral.id }}</h1>
             </div>
             <div class="flex gap-2">
                 <span class="px-3 py-1 rounded text-sm
-                    {% if referral.status == 'pending' %}bg-yellow-500
-                    {% elif referral.status == 'in_review' %}bg-blue-500
-                    {% elif referral.status == 'approved' %}bg-green-500
-                    {% elif referral.status == 'rejected' %}bg-red-500
+                    {% if referral.status.value == 'pending_validation' %}bg-yellow-500
+                    {% elif referral.status.value == 'validated' %}bg-blue-500
+                    {% elif referral.status.value == 'pending_scheduling' %}bg-purple-500
+                    {% elif referral.status.value == 'scheduled' %}bg-green-500
+                    {% elif referral.status.value == 'rejected' %}bg-red-500
                     {% else %}bg-gray-500{% endif %}">
-                    {{ referral.status | upper }}
+                    {{ referral.status.value | upper | replace('_', ' ') }}
                 </span>
                 <span class="px-3 py-1 rounded text-sm
-                    {% if referral.priority == 'urgent' %}bg-red-600 font-bold
-                    {% elif referral.priority == 'high' %}bg-red-500
-                    {% elif referral.priority == 'medium' %}bg-yellow-500
+                    {% if referral.priority.value == 'urgent' %}bg-red-600 font-bold
+                    {% elif referral.priority.value == 'high' %}bg-red-500
+                    {% elif referral.priority.value == 'medium' %}bg-yellow-500
                     {% else %}bg-gray-500{% endif %}">
-                    {{ referral.priority | upper }}
+                    {{ referral.priority.value | upper }}
                 </span>
             </div>
         </div>
     </nav>
 
     <main class="container mx-auto p-6">
+        <!-- Queue Context Header (shown when accessed from queue) -->
+        <div x-show="queueItemId" x-cloak
+             class="bg-blue-50 border-l-4 border-blue-500 p-4 mb-6 rounded-r-lg">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-4">
+                    <span class="font-medium text-blue-700">Working from Intake Queue</span>
+                    <span class="text-blue-600">|</span>
+                    <span class="text-blue-600">Wait: <span x-text="waitTimeDisplay"></span></span>
+                </div>
+                <div class="flex gap-3">
+                    <button @click="releaseItem()"
+                            class="px-3 py-1 text-sm bg-white border border-blue-300 text-blue-700 rounded hover:bg-blue-100">
+                        Release Item
+                    </button>
+                    <a :href="'/intake?user=' + currentUser"
+                       class="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700">
+                        Back to Queue
+                    </a>
+                </div>
+            </div>
+        </div>
+
         <!-- Quick Actions Bar -->
         <div class="bg-white rounded-lg shadow mb-6 p-4">
             <div class="flex flex-wrap gap-3 items-center">
                 <span class="text-gray-600 font-medium">Quick Actions:</span>
 
                 <!-- Open in Outlook -->
-                {% if referral.email_web_link %}
-                <a href="{{ referral.email_web_link }}" target="_blank"
+                {% if referral.source_email and referral.source_email.web_link %}
+                <a href="{{ referral.source_email.web_link }}" target="_blank"
                    class="inline-flex items-center gap-2 px-4 py-2 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition">
                     <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
                         <path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z"></path>
@@ -103,11 +129,11 @@
                 <!-- Approve/Reject Buttons -->
                 <button @click="approveReferral()"
                         class="inline-flex items-center gap-2 px-6 py-2 bg-green-600 text-white rounded hover:bg-green-700 transition font-medium">
-                    ✓ Approve
+                    Approve
                 </button>
                 <button @click="showRejectModal = true"
                         class="inline-flex items-center gap-2 px-6 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition font-medium">
-                    ✗ Reject
+                    Reject
                 </button>
             </div>
         </div>
@@ -121,8 +147,8 @@
                 <div class="bg-white rounded-lg shadow">
                     <div class="border-b px-4 py-3 flex justify-between items-center">
                         <h2 class="text-lg font-semibold text-gray-800">Original Email</h2>
-                        {% if referral.email_web_link %}
-                        <a href="{{ referral.email_web_link }}" target="_blank"
+                        {% if referral.source_email and referral.source_email.web_link %}
+                        <a href="{{ referral.source_email.web_link }}" target="_blank"
                            class="text-blue-600 hover:text-blue-800 text-sm">
                             Open in Outlook &rarr;
                         </a>
@@ -131,16 +157,16 @@
                     <div class="p-4">
                         <div class="mb-3 text-sm text-gray-600">
                             <p><strong>From:</strong> {{ referral.adjuster_email or 'Unknown' }}</p>
-                            <p><strong>Subject:</strong> {{ referral.email_subject or 'No subject' }}</p>
+                            <p><strong>Subject:</strong> {{ referral.source_email.subject if referral.source_email else 'No subject' }}</p>
                             <p><strong>Received:</strong> {{ referral.received_at.strftime('%Y-%m-%d %H:%M') if referral.received_at else 'Unknown' }}</p>
                         </div>
                         <div class="email-preview border rounded p-4 bg-gray-50">
-                            {% if referral.email_body_html %}
-                            <iframe srcdoc="{{ referral.email_body_html | e }}"
+                            {% if referral.source_email and referral.source_email.body_html %}
+                            <iframe srcdoc="{{ referral.source_email.body_html | e }}"
                                     class="w-full h-96 border-0"
                                     sandbox="allow-same-origin"></iframe>
-                            {% elif referral.email_body_preview %}
-                            <pre class="whitespace-pre-wrap text-sm">{{ referral.email_body_preview }}</pre>
+                            {% elif referral.source_email and referral.source_email.body_preview %}
+                            <pre class="whitespace-pre-wrap text-sm">{{ referral.source_email.body_preview }}</pre>
                             {% else %}
                             <p class="text-gray-500 italic">No email content available</p>
                             {% endif %}
@@ -176,7 +202,7 @@
                                             <p class="font-medium text-gray-800">{{ att.filename }}</p>
                                             <p class="text-xs text-gray-500">
                                                 {{ (att.size_bytes / 1024) | round(1) }} KB
-                                                {% if att.document_type %} · {{ att.document_type }}{% endif %}
+                                                {% if att.document_type %} | {{ att.document_type }}{% endif %}
                                             </p>
                                         </div>
                                     </div>
@@ -208,7 +234,7 @@
                                         <span x-show="showExtractedText !== {{ loop.index }}">Show extracted text</span>
                                         <span x-show="showExtractedText === {{ loop.index }}">Hide extracted text</span>
                                     </button>
-                                    <div x-show="showExtractedText === {{ loop.index }}" x-collapse
+                                    <div x-show="showExtractedText === {{ loop.index }}" x-cloak
                                          class="mt-2 p-2 bg-gray-100 rounded text-xs attachment-preview">
                                         <pre class="whitespace-pre-wrap">{{ att.extracted_text[:2000] }}{% if att.extracted_text | length > 2000 %}...{% endif %}</pre>
                                     </div>
@@ -226,16 +252,20 @@
 
             <!-- RIGHT: Extracted Data (Editable) -->
             <div class="space-y-6">
-                <!-- Claimant Information -->
+                <!-- Injured Worker Information -->
                 <div class="bg-white rounded-lg shadow">
                     <div class="border-b px-4 py-3">
-                        <h2 class="text-lg font-semibold text-gray-800">Claimant Information</h2>
+                        <h2 class="text-lg font-semibold text-gray-800">Injured Worker Information</h2>
                     </div>
                     <div class="p-4 space-y-4">
-                        {{ field_row('claimant_name', 'Name', referral.claimant_name, extraction_data) }}
-                        {{ field_row('claimant_dob', 'Date of Birth', referral.claimant_dob, extraction_data) }}
-                        {{ field_row('claimant_phone', 'Phone', referral.claimant_phone, extraction_data) }}
-                        {{ field_row('claimant_address', 'Address', referral.claimant_address, extraction_data) }}
+                        {{ field_row('patient_first_name', 'First Name', referral.patient_first_name, extraction_data) }}
+                        {{ field_row('patient_last_name', 'Last Name', referral.patient_last_name, extraction_data) }}
+                        {{ field_row('patient_dob', 'Date of Birth', referral.patient_dob.strftime('%Y-%m-%d') if referral.patient_dob else '', extraction_data) }}
+                        {{ field_row('patient_phone', 'Phone', referral.patient_phone, extraction_data) }}
+                        {{ field_row('patient_address_1', 'Address', referral.patient_address_1, extraction_data) }}
+                        {{ field_row('patient_city', 'City', referral.patient_city, extraction_data) }}
+                        {{ field_row('patient_state', 'State', referral.patient_state, extraction_data) }}
+                        {{ field_row('patient_zip', 'ZIP', referral.patient_zip, extraction_data) }}
                     </div>
                 </div>
 
@@ -247,10 +277,50 @@
                     <div class="p-4 space-y-4">
                         {{ field_row('carrier_name_raw', 'Insurance Carrier', referral.carrier_name_raw, extraction_data) }}
                         {{ field_row('claim_number', 'Claim Number', referral.claim_number, extraction_data) }}
-                        {{ field_row('date_of_injury', 'Date of Injury', referral.date_of_injury, extraction_data) }}
+                        {{ field_row('patient_doi', 'Date of Injury', referral.patient_doi.strftime('%Y-%m-%d') if referral.patient_doi else '', extraction_data) }}
+                        {{ field_row('jurisdiction_state', 'Jurisdiction', referral.jurisdiction_state, extraction_data) }}
                         {{ field_row('body_parts', 'Body Parts', referral.body_parts, extraction_data) }}
-                        {{ field_row('service_requested', 'Service Requested', referral.service_requested, extraction_data) }}
                         {{ field_row('authorization_number', 'Authorization #', referral.authorization_number, extraction_data) }}
+
+                        <!-- RX Attachment Selector -->
+                        <div class="mt-4 pt-4 border-t">
+                            <div class="flex items-start gap-4">
+                                <label class="w-32 text-sm font-medium text-gray-600 pt-2">RX Attachment:</label>
+                                <div class="flex-1">
+                                    <!-- Current RX attachment display -->
+                                    <template x-if="rxAttachment">
+                                        <div class="flex items-center gap-3 p-3 bg-green-50 border border-green-200 rounded mb-3">
+                                            <svg class="w-5 h-5 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+                                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                                            </svg>
+                                            <span class="font-medium text-green-800" x-text="rxAttachment.filename"></span>
+                                            <button @click="clearRxAttachment()"
+                                                    class="ml-auto text-red-600 hover:text-red-800 text-sm">
+                                                Clear
+                                            </button>
+                                        </div>
+                                    </template>
+
+                                    <!-- Select from existing attachments -->
+                                    <div class="flex flex-wrap gap-2">
+                                        <select x-model="selectedRxAttachmentId"
+                                                @change="setRxAttachment()"
+                                                class="flex-1 p-2 border rounded focus:ring-2 focus:ring-blue-500">
+                                            <option value="">-- Select attachment as RX --</option>
+                                            <template x-for="att in allAttachments" :key="att.id">
+                                                <option :value="att.id" x-text="att.filename"></option>
+                                            </template>
+                                        </select>
+                                        <span class="text-gray-400 self-center">or</span>
+                                        <label class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 cursor-pointer text-sm">
+                                            Upload New
+                                            <input type="file" class="hidden" @change="uploadRxAttachment($event)">
+                                        </label>
+                                    </div>
+                                    <p class="text-xs text-gray-500 mt-1">Select an existing attachment or upload a new prescription document</p>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -264,32 +334,6 @@
                         {{ field_row('adjuster_email', 'Email', referral.adjuster_email, extraction_data) }}
                         {{ field_row('adjuster_phone', 'Phone', referral.adjuster_phone, extraction_data) }}
                         {{ field_row('employer_name', 'Employer', referral.employer_name, extraction_data) }}
-                    </div>
-                </div>
-
-                <!-- Provider Assignment -->
-                <div class="bg-white rounded-lg shadow">
-                    <div class="border-b px-4 py-3">
-                        <h2 class="text-lg font-semibold text-gray-800">Provider Assignment</h2>
-                    </div>
-                    <div class="p-4">
-                        {% if referral.provider %}
-                        <div class="p-3 bg-green-50 rounded border border-green-200">
-                            <p class="font-medium text-green-800">{{ referral.provider.name }}</p>
-                            <p class="text-sm text-green-600">{{ referral.provider.phone }}</p>
-                            {% if referral.rate_amount %}
-                            <p class="text-sm text-green-600">Rate: ${{ "%.2f" | format(referral.rate_amount) }}</p>
-                            {% endif %}
-                        </div>
-                        {% else %}
-                        <div class="space-y-3">
-                            <p class="text-gray-500">No provider assigned</p>
-                            <button @click="showProviderModal = true"
-                                    class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
-                                Find Provider
-                            </button>
-                        </div>
-                        {% endif %}
                     </div>
                 </div>
 
@@ -312,6 +356,79 @@
             </div>
         </div>
 
+        <!-- Service Line Items Section -->
+        <div class="mt-6 bg-white rounded-lg shadow">
+            <div class="border-b px-4 py-3 flex justify-between items-center">
+                <h2 class="text-lg font-semibold text-gray-800">
+                    Service Line Items (<span x-text="lineItems.length">{{ line_items | length }}</span>)
+                </h2>
+                <button @click="openAddLineItemModal()"
+                        class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+                    </svg>
+                    Add Service
+                </button>
+            </div>
+            <div class="p-4">
+                <template x-if="lineItems.length === 0">
+                    <p class="text-gray-500 italic text-center py-4">No line items. Click "Add Service" to add one.</p>
+                </template>
+                <div class="space-y-3">
+                    <template x-for="item in lineItems" :key="item.id">
+                        <div class="border rounded p-4 hover:bg-gray-50 transition">
+                            <div class="flex items-start justify-between">
+                                <div class="flex-1">
+                                    <div class="flex items-center gap-3">
+                                        <span class="w-8 h-8 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-sm font-medium"
+                                              x-text="item.line_number"></span>
+                                        <div>
+                                            <p class="font-medium text-gray-800" x-text="item.service_description"></p>
+                                            <div class="flex flex-wrap gap-2 mt-1 text-xs">
+                                                <template x-if="item.icd10_code">
+                                                    <span class="px-2 py-0.5 bg-purple-100 text-purple-700 rounded">
+                                                        ICD-10: <span x-text="item.icd10_code"></span>
+                                                    </span>
+                                                </template>
+                                                <template x-if="item.procedure_code">
+                                                    <span class="px-2 py-0.5 bg-green-100 text-green-700 rounded">
+                                                        CPT: <span x-text="item.procedure_code"></span>
+                                                    </span>
+                                                </template>
+                                                <template x-if="item.laterality">
+                                                    <span class="px-2 py-0.5 bg-gray-100 text-gray-700 rounded"
+                                                          x-text="item.laterality.charAt(0).toUpperCase() + item.laterality.slice(1)"></span>
+                                                </template>
+                                                <template x-if="item.with_contrast">
+                                                    <span class="px-2 py-0.5 bg-yellow-100 text-yellow-700 rounded">With Contrast</span>
+                                                </template>
+                                                <template x-if="item.source === 'extraction'">
+                                                    <span class="px-2 py-0.5 bg-blue-50 text-blue-600 rounded"
+                                                          :title="'Confidence: ' + Math.round(item.confidence || 0) + '%'">
+                                                        Extracted
+                                                    </span>
+                                                </template>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2 ml-4">
+                                    <button @click="openEditLineItemModal(item)"
+                                            class="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200">
+                                        Edit
+                                    </button>
+                                    <button @click="deleteLineItem(item.id)"
+                                            class="px-3 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200">
+                                        Delete
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+
         <!-- Audit History -->
         <div class="mt-6 bg-white rounded-lg shadow">
             <div class="border-b px-4 py-3">
@@ -325,7 +442,7 @@
                         <span class="text-gray-400 w-40">{{ log.timestamp.strftime('%Y-%m-%d %H:%M') }}</span>
                         <span class="font-medium text-gray-700">{{ log.action }}</span>
                         {% if log.field_name %}
-                        <span class="text-gray-500">{{ log.field_name }}: {{ log.old_value or '(empty)' }} → {{ log.new_value }}</span>
+                        <span class="text-gray-500">{{ log.field_name }}: {{ log.old_value or '(empty)' }} -> {{ log.new_value }}</span>
                         {% endif %}
                         <span class="text-gray-400">by {{ log.user }}</span>
                     </div>
@@ -344,7 +461,7 @@
         <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4" @click.away="showReplyModal = false">
             <div class="border-b px-6 py-4 flex justify-between items-center">
                 <h3 class="text-lg font-semibold">Reply to Adjuster</h3>
-                <button @click="showReplyModal = false" class="text-gray-400 hover:text-gray-600">&times;</button>
+                <button @click="showReplyModal = false" class="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
             </div>
             <div class="p-6">
                 <div class="mb-4">
@@ -410,42 +527,267 @@
         </div>
     </div>
 
+    <!-- Line Item Modal (Add/Edit) -->
+    <div x-show="showLineItemModal" x-cloak
+         class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-xl mx-4" @click.away="showLineItemModal = false">
+            <div class="border-b px-6 py-4 flex justify-between items-center">
+                <h3 class="text-lg font-semibold" x-text="editingLineItem ? 'Edit Line Item' : 'Add Line Item'"></h3>
+                <button @click="showLineItemModal = false" class="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
+            </div>
+            <div class="p-6">
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Service Description *</label>
+                        <input type="text" x-model="lineItemForm.service_description"
+                               class="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
+                               placeholder="e.g., MRI lumbar spine without contrast">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">ICD-10 Code</label>
+                            <input type="text" x-model="lineItemForm.icd10_code"
+                                   class="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
+                                   placeholder="e.g., M54.5">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Procedure Code (CPT)</label>
+                            <input type="text" x-model="lineItemForm.procedure_code"
+                                   class="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
+                                   placeholder="e.g., 72148">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">ICD-10 Description</label>
+                        <input type="text" x-model="lineItemForm.icd10_description"
+                               class="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
+                               placeholder="e.g., Low back pain">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Laterality</label>
+                            <select x-model="lineItemForm.laterality"
+                                    class="w-full p-2 border rounded">
+                                <option value="">None</option>
+                                <option value="left">Left</option>
+                                <option value="right">Right</option>
+                                <option value="bilateral">Bilateral</option>
+                            </select>
+                        </div>
+                        <div class="flex items-center pt-6">
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" x-model="lineItemForm.with_contrast"
+                                       class="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                                <span class="text-gray-700">With Contrast</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex gap-3 mt-6">
+                    <button @click="saveLineItem()"
+                            class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+                            :disabled="!lineItemForm.service_description">
+                        <span x-text="editingLineItem ? 'Update' : 'Add'"></span>
+                    </button>
+                    <button @click="showLineItemModal = false"
+                            class="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         function reviewApp() {
             return {
                 referralId: {{ referral.id }},
-                notes: '{{ referral.notes or "" | e }}',
+                notes: '{{ (referral.notes or "") | e }}',
+                lineItems: {{ line_items | tojson if line_items else '[]' }},
                 showReplyModal: false,
                 showRejectModal: false,
                 showProviderModal: false,
+                showLineItemModal: false,
                 showExtractedText: null,
                 selectedTemplate: '',
                 replyBody: '',
                 rejectReason: '',
 
+                // RX Attachment
+                rxAttachment: {{ {'id': referral.rx_attachment_id, 'filename': referral.rx_attachment.filename} | tojson if referral.rx_attachment else 'null' }},
+                allAttachments: [],
+                selectedRxAttachmentId: '',
+
+                // Queue context
+                queueItemId: new URLSearchParams(window.location.search).get('queue_item'),
+                currentUser: new URLSearchParams(window.location.search).get('user') || 'anonymous',
+                waitTimeDisplay: '',
+
+                // Line item form
+                editingLineItem: null,
+                lineItemForm: {
+                    service_description: '',
+                    icd10_code: '',
+                    icd10_description: '',
+                    procedure_code: '',
+                    procedure_description: '',
+                    laterality: '',
+                    with_contrast: false
+                },
+
+                init() {
+                    // Load all attachments for RX selector
+                    this.loadAllAttachments();
+
+                    // Calculate wait time if we have queue context
+                    if (this.queueItemId) {
+                        this.updateWaitTime();
+                        setInterval(() => this.updateWaitTime(), 60000);
+                    }
+                },
+
+                async loadAllAttachments() {
+                    try {
+                        const resp = await fetch(`/api/referrals/${this.referralId}/all-attachments`);
+                        if (resp.ok) {
+                            this.allAttachments = await resp.json();
+                        }
+                    } catch (e) {
+                        console.error('Failed to load attachments:', e);
+                    }
+                },
+
+                async setRxAttachment() {
+                    if (!this.selectedRxAttachmentId) return;
+
+                    try {
+                        const resp = await fetch(`/api/referrals/${this.referralId}/rx-attachment`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-User-Id': this.currentUser
+                            },
+                            body: JSON.stringify({ attachment_id: parseInt(this.selectedRxAttachmentId) })
+                        });
+
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            this.rxAttachment = { id: data.rx_attachment_id, filename: data.filename };
+                            this.selectedRxAttachmentId = '';
+                        } else {
+                            alert('Failed to set RX attachment');
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                },
+
+                async clearRxAttachment() {
+                    try {
+                        const resp = await fetch(`/api/referrals/${this.referralId}/rx-attachment`, {
+                            method: 'DELETE',
+                            headers: {
+                                'X-User-Id': this.currentUser
+                            }
+                        });
+
+                        if (resp.ok) {
+                            this.rxAttachment = null;
+                        } else {
+                            alert('Failed to clear RX attachment');
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                },
+
+                async uploadRxAttachment(event) {
+                    const file = event.target.files[0];
+                    if (!file) return;
+
+                    const formData = new FormData();
+                    formData.append('file', file);
+
+                    try {
+                        // Upload the file
+                        const uploadResp = await fetch(`/api/referrals/${this.referralId}/attachments`, {
+                            method: 'POST',
+                            headers: {
+                                'X-User-Id': this.currentUser
+                            },
+                            body: formData
+                        });
+
+                        if (!uploadResp.ok) {
+                            alert('Failed to upload file');
+                            return;
+                        }
+
+                        const uploadedAtt = await uploadResp.json();
+
+                        // Set it as RX attachment
+                        const setResp = await fetch(`/api/referrals/${this.referralId}/rx-attachment`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-User-Id': this.currentUser
+                            },
+                            body: JSON.stringify({ attachment_id: uploadedAtt.id })
+                        });
+
+                        if (setResp.ok) {
+                            this.rxAttachment = { id: uploadedAtt.id, filename: uploadedAtt.filename };
+                            this.allAttachments.push(uploadedAtt);
+                        } else {
+                            alert('File uploaded but failed to set as RX attachment');
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+
+                    // Clear the file input
+                    event.target.value = '';
+                },
+
+                updateWaitTime() {
+                    // This would need the entered_queue_at time from the API
+                    // For now, show a placeholder
+                    this.waitTimeDisplay = 'In Progress';
+                },
+
                 loadTemplate() {
                     const templates = {
-                        confirmation: `Hi {{ referral.adjuster_name or 'there' }},\n\nThis confirms receipt of your referral for {{ referral.claimant_name or 'the claimant' }} (Claim #{{ referral.claim_number or 'N/A' }}).\n\nWe're processing this and will have scheduling information shortly.\n\nBest regards`,
-                        missing_auth: `Hi {{ referral.adjuster_name or 'there' }},\n\nThank you for the referral for {{ referral.claimant_name or 'the claimant' }}.\n\nTo proceed with scheduling, we'll need a copy of the authorization letter. Please reply with this document attached.\n\nBest regards`,
-                        need_dob: `Hi {{ referral.adjuster_name or 'there' }},\n\nWe're processing the referral for {{ referral.claimant_name or 'the claimant' }}.\n\nWe need the claimant's date of birth to proceed. Could you please provide this?\n\nBest regards`,
-                        clarify_service: `Hi {{ referral.adjuster_name or 'there' }},\n\nThank you for the referral for {{ referral.claimant_name or 'the claimant' }}.\n\nCould you please clarify the specific service being requested?\n\nBest regards`
+                        confirmation: `Hi {{ referral.adjuster_name or 'there' }},\n\nThis confirms receipt of your referral for {{ referral.patient_first_name or '' }} {{ referral.patient_last_name or 'the injured worker' }} (Claim #{{ referral.claim_number or 'N/A' }}).\n\nWe're processing this and will have scheduling information shortly.\n\nBest regards`,
+                        missing_auth: `Hi {{ referral.adjuster_name or 'there' }},\n\nThank you for the referral for {{ referral.patient_first_name or '' }} {{ referral.patient_last_name or 'the injured worker' }}.\n\nTo proceed with scheduling, we'll need a copy of the authorization letter. Please reply with this document attached.\n\nBest regards`,
+                        need_dob: `Hi {{ referral.adjuster_name or 'there' }},\n\nWe're processing the referral for {{ referral.patient_first_name or '' }} {{ referral.patient_last_name or 'the injured worker' }}.\n\nWe need the injured worker's date of birth to proceed. Could you please provide this?\n\nBest regards`,
+                        clarify_service: `Hi {{ referral.adjuster_name or 'there' }},\n\nThank you for the referral for {{ referral.patient_first_name or '' }} {{ referral.patient_last_name or 'the injured worker' }}.\n\nCould you please clarify the specific service being requested?\n\nBest regards`
                     };
                     this.replyBody = templates[this.selectedTemplate] || '';
                 },
 
                 getOutlookReplyUrl() {
-                    const subject = encodeURIComponent('RE: {{ referral.email_subject or "Referral" | e }}');
+                    const subject = encodeURIComponent('RE: {{ referral.source_email.subject if referral.source_email else "Referral" | e }}');
                     const body = encodeURIComponent(this.replyBody);
                     const to = '{{ referral.adjuster_email | e }}';
                     return `https://outlook.office.com/mail/deeplink/compose?to=${to}&subject=${subject}&body=${body}`;
                 },
 
                 async approveReferral() {
-                    if (!confirm('Approve this referral?')) return;
+                    if (!confirm('Approve this referral and move to Care Coordination queue?')) return;
                     try {
-                        const resp = await fetch(`/api/referrals/${this.referralId}/approve`, {method: 'POST'});
+                        const resp = await fetch(`/api/referrals/${this.referralId}/validate`, {
+                            method: 'POST',
+                            headers: {
+                                'X-User-Id': this.currentUser
+                            }
+                        });
                         if (resp.ok) {
-                            window.location.reload();
+                            // Redirect back to intake queue
+                            if (this.queueItemId) {
+                                window.location.href = '/intake?user=' + this.currentUser;
+                            } else {
+                                window.location.reload();
+                            }
                         } else {
                             alert('Failed to approve referral');
                         }
@@ -460,11 +802,42 @@
                         return;
                     }
                     try {
-                        const resp = await fetch(`/api/referrals/${this.referralId}/reject?reason=${encodeURIComponent(this.rejectReason)}`, {method: 'POST'});
+                        const resp = await fetch(`/api/referrals/${this.referralId}/reject?reason=${encodeURIComponent(this.rejectReason)}`, {
+                            method: 'POST',
+                            headers: {
+                                'X-User-Id': this.currentUser
+                            }
+                        });
                         if (resp.ok) {
-                            window.location.reload();
+                            // Redirect back to intake queue
+                            if (this.queueItemId) {
+                                window.location.href = '/intake?user=' + this.currentUser;
+                            } else {
+                                window.location.reload();
+                            }
                         } else {
                             alert('Failed to reject referral');
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                },
+
+                async releaseItem() {
+                    if (!this.queueItemId) return;
+                    if (!confirm('Release this item back to the queue?')) return;
+
+                    try {
+                        const resp = await fetch(`/api/queue-items/${this.queueItemId}/release`, {
+                            method: 'POST',
+                            headers: {
+                                'X-User-Id': this.currentUser
+                            }
+                        });
+                        if (resp.ok) {
+                            window.location.href = '/intake?user=' + this.currentUser;
+                        } else {
+                            alert('Failed to release item');
                         }
                     } catch (e) {
                         alert('Error: ' + e.message);
@@ -475,7 +848,10 @@
                     try {
                         const resp = await fetch(`/api/referrals/${this.referralId}`, {
                             method: 'PATCH',
-                            headers: {'Content-Type': 'application/json'},
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-User-Id': this.currentUser
+                            },
                             body: JSON.stringify({notes: this.notes})
                         });
                         if (resp.ok) {
@@ -492,7 +868,10 @@
                     try {
                         const resp = await fetch(`/api/referrals/${this.referralId}`, {
                             method: 'PATCH',
-                            headers: {'Content-Type': 'application/json'},
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-User-Id': this.currentUser
+                            },
                             body: JSON.stringify({[field]: value})
                         });
                         if (!resp.ok) {
@@ -501,10 +880,110 @@
                     } catch (e) {
                         console.error('Update error:', e);
                     }
+                },
+
+                // Line item methods
+                openAddLineItemModal() {
+                    this.editingLineItem = null;
+                    this.lineItemForm = {
+                        service_description: '',
+                        icd10_code: '',
+                        icd10_description: '',
+                        procedure_code: '',
+                        procedure_description: '',
+                        laterality: '',
+                        with_contrast: false
+                    };
+                    this.showLineItemModal = true;
+                },
+
+                openEditLineItemModal(item) {
+                    this.editingLineItem = item;
+                    this.lineItemForm = {
+                        service_description: item.service_description || '',
+                        icd10_code: item.icd10_code || '',
+                        icd10_description: item.icd10_description || '',
+                        procedure_code: item.procedure_code || '',
+                        procedure_description: item.procedure_description || '',
+                        laterality: item.laterality || '',
+                        with_contrast: item.with_contrast || false
+                    };
+                    this.showLineItemModal = true;
+                },
+
+                async saveLineItem() {
+                    if (!this.lineItemForm.service_description.trim()) {
+                        alert('Service description is required');
+                        return;
+                    }
+
+                    try {
+                        let resp;
+                        if (this.editingLineItem) {
+                            // Update existing
+                            resp = await fetch(`/api/referrals/${this.referralId}/line-items/${this.editingLineItem.id}`, {
+                                method: 'PATCH',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-User-Id': this.currentUser
+                                },
+                                body: JSON.stringify(this.lineItemForm)
+                            });
+                        } else {
+                            // Create new
+                            resp = await fetch(`/api/referrals/${this.referralId}/line-items`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-User-Id': this.currentUser
+                                },
+                                body: JSON.stringify(this.lineItemForm)
+                            });
+                        }
+
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            if (this.editingLineItem) {
+                                // Update in list
+                                const idx = this.lineItems.findIndex(li => li.id === this.editingLineItem.id);
+                                if (idx >= 0) {
+                                    this.lineItems[idx] = data;
+                                }
+                            } else {
+                                // Add to list
+                                this.lineItems.push(data);
+                            }
+                            this.showLineItemModal = false;
+                        } else {
+                            alert('Failed to save line item');
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                },
+
+                async deleteLineItem(lineItemId) {
+                    if (!confirm('Delete this line item?')) return;
+
+                    try {
+                        const resp = await fetch(`/api/referrals/${this.referralId}/line-items/${lineItemId}`, {
+                            method: 'DELETE',
+                            headers: {
+                                'X-User-Id': this.currentUser
+                            }
+                        });
+
+                        if (resp.ok) {
+                            this.lineItems = this.lineItems.filter(li => li.id !== lineItemId);
+                        } else {
+                            alert('Failed to delete line item');
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
                 }
             }
         }
     </script>
-
 </body>
 </html>

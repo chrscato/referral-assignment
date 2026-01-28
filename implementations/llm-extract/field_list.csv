@@ -1,0 +1,31 @@
+llm call,field,notes
+extraction step 1,Referring_Physician_NPI,10 digit number sometimes shown near the referring physician
+extraction step 1,Assigning_Adjuster_name,typically who the email is coming from
+extraction step 1,Assigning_Adjuster_phone,typically who the email is coming from
+extraction step 1,Assigning_adjuster_email,typically who the email is coming from
+extraction step 1,Assigning_Company,typically who the email is coming from
+extraction step 1,Claim_Number,
+extraction step 1,Jurisdiction_State,
+extraction step 1,Order_Type,
+extraction step 1,Patient_employer,
+extraction step 1,patient_job_title,
+extraction step 1,patient_employer_address,
+extraction step 1,Patient_Address_1_2,
+extraction step 1,Patient_Address_City,
+extraction step 1,Patient_Address_State,
+extraction step 1,Patient_Address_ZIP,
+extraction step 1,PatientDOB,
+extraction step 1,patient_DOI,date of injury
+extraction step 1,PatientGender,Male or Female
+extraction step 1,PatientFirst_Name,
+extraction step 1,PatientLast_Name,
+extraction step 1,PatientPhone,
+extraction step 1,PatientEmail,
+extraction step 1,PatientSSN,social security no
+extraction step 1,referring Physician Name,
+extraction step 1,service_requested,"service needed for the injured worker (can be multiple MRI's, CT, Xray etc. different views. With or without contrast etc.)"
+extraction step 1,ICD-10 Code,an ICD 10 code
+extraction step 1,ICD-10 Desc,a description near the ICD10 code
+extraction step 1,Suggested Providers,any provider that the adjuster or patient is showing preference for the service
+extraction step 1,Special requirements,any notes or considerations for the injured worker needs for this service
+Reasoning_step_2,Associated_procedure_code,lookup the procedures table for associated code for the services requried

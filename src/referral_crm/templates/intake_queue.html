@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intake Queue - Referral CRM</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen" x-data="intakeQueueApp()" x-init="init()">
+    <!-- Header -->
+    <nav class="bg-blue-600 text-white p-4 shadow-lg">
+        <div class="container mx-auto flex justify-between items-center">
+            <div class="flex items-center gap-4">
+                <a href="/" class="text-white hover:text-blue-200">&larr; Dashboard</a>
+                <h1 class="text-xl font-bold">Intake Queue</h1>
+            </div>
+            <div class="flex items-center gap-4">
+                <span class="text-sm opacity-75">User:</span>
+                <span class="font-medium" x-text="currentUser"></span>
+                <button @click="refreshQueue()"
+                        class="px-3 py-1 bg-blue-500 hover:bg-blue-400 rounded text-sm flex items-center gap-2"
+                        :class="{'opacity-50': loading}">
+                    <svg class="w-4 h-4" :class="{'animate-spin': loading}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    Refresh
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <main class="container mx-auto p-6">
+        <!-- Stats Bar -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div class="bg-yellow-100 p-4 rounded-lg shadow text-center">
+                <div class="text-3xl font-bold text-yellow-600" x-text="stats.pending || 0"></div>
+                <div class="text-sm text-yellow-800">Pending</div>
+            </div>
+            <div class="bg-blue-100 p-4 rounded-lg shadow text-center">
+                <div class="text-3xl font-bold text-blue-600" x-text="stats.in_progress || 0"></div>
+                <div class="text-sm text-blue-800">In Progress</div>
+            </div>
+            <div class="bg-red-100 p-4 rounded-lg shadow text-center">
+                <div class="text-3xl font-bold text-red-600" x-text="stats.overdue || 0"></div>
+                <div class="text-sm text-red-800">Overdue</div>
+            </div>
+            <div class="bg-gray-100 p-4 rounded-lg shadow text-center">
+                <div class="text-3xl font-bold text-gray-600" x-text="(stats.sla_minutes || 60) + 'm'"></div>
+                <div class="text-sm text-gray-800">SLA Target</div>
+            </div>
+        </div>
+
+        <!-- Filters -->
+        <div class="bg-white rounded-lg shadow mb-6 p-4">
+            <div class="flex flex-wrap gap-4 items-center">
+                <span class="text-gray-600 font-medium">Filters:</span>
+                <select x-model="priorityFilter" @change="refreshQueue()"
+                        class="border rounded px-3 py-1">
+                    <option value="">All Priorities</option>
+                    <option value="urgent">Urgent</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                </select>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="overdueOnly" @change="refreshQueue()"
+                           class="w-4 h-4 rounded">
+                    <span class="text-sm text-gray-700">Overdue Only</span>
+                </label>
+                <div class="flex-grow"></div>
+                <span class="text-sm text-gray-500">
+                    Auto-refresh: <span x-text="autoRefreshCountdown + 's'"></span>
+                </span>
+            </div>
+        </div>
+
+        <!-- Queue Items Table -->
+        <div class="bg-white rounded-lg shadow">
+            <div class="border-b px-4 py-3">
+                <h2 class="text-lg font-semibold text-gray-800">
+                    Queue Items (<span x-text="items.length"></span>)
+                </h2>
+            </div>
+
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="text-left p-3 font-medium text-gray-600">Priority</th>
+                            <th class="text-left p-3 font-medium text-gray-600">Injured Worker</th>
+                            <th class="text-left p-3 font-medium text-gray-600">Carrier</th>
+                            <th class="text-left p-3 font-medium text-gray-600">Claim #</th>
+                            <th class="text-left p-3 font-medium text-gray-600">Confidence</th>
+                            <th class="text-left p-3 font-medium text-gray-600">Wait Time</th>
+                            <th class="text-left p-3 font-medium text-gray-600">Status</th>
+                            <th class="text-left p-3 font-medium text-gray-600">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-if="items.length === 0">
+                            <tr>
+                                <td colspan="8" class="p-8 text-center text-gray-500">
+                                    <span x-show="!loading">No items in queue</span>
+                                    <span x-show="loading">Loading...</span>
+                                </td>
+                            </tr>
+                        </template>
+                        <template x-for="item in items" :key="item.id">
+                            <tr class="border-b hover:bg-gray-50 transition"
+                                :class="{'bg-red-50': item.is_overdue}">
+                                <!-- Priority -->
+                                <td class="p-3">
+                                    <span class="px-2 py-1 rounded text-xs font-medium"
+                                          :class="{
+                                              'bg-red-600 text-white': item.priority === 'urgent',
+                                              'bg-red-100 text-red-800': item.priority === 'high',
+                                              'bg-yellow-100 text-yellow-800': item.priority === 'medium',
+                                              'bg-gray-100 text-gray-800': item.priority === 'low'
+                                          }"
+                                          x-text="item.priority.toUpperCase()">
+                                    </span>
+                                </td>
+                                <!-- Patient -->
+                                <td class="p-3">
+                                    <span x-text="item.patient_name || '-'" class="font-medium"></span>
+                                </td>
+                                <!-- Carrier -->
+                                <td class="p-3">
+                                    <span x-text="item.carrier_name || '-'" class="text-gray-600"></span>
+                                </td>
+                                <!-- Claim # -->
+                                <td class="p-3">
+                                    <span x-text="item.claim_number || '-'" class="text-gray-600 font-mono text-sm"></span>
+                                </td>
+                                <!-- Confidence -->
+                                <td class="p-3">
+                                    <template x-if="item.extraction_confidence !== null">
+                                        <span class="px-2 py-1 rounded text-xs"
+                                              :class="{
+                                                  'bg-green-100 text-green-800': item.extraction_confidence >= 90,
+                                                  'bg-yellow-100 text-yellow-800': item.extraction_confidence >= 70 && item.extraction_confidence < 90,
+                                                  'bg-red-100 text-red-800': item.extraction_confidence < 70
+                                              }"
+                                              x-text="Math.round(item.extraction_confidence) + '%'">
+                                        </span>
+                                    </template>
+                                    <template x-if="item.extraction_confidence === null">
+                                        <span class="text-gray-400">-</span>
+                                    </template>
+                                </td>
+                                <!-- Wait Time -->
+                                <td class="p-3">
+                                    <span :class="{'text-red-600 font-bold': item.is_overdue, 'text-gray-600': !item.is_overdue}"
+                                          x-text="formatWaitTime(item.wait_time_minutes)">
+                                    </span>
+                                    <template x-if="item.is_overdue">
+                                        <span class="ml-1 text-red-600" title="Overdue">!</span>
+                                    </template>
+                                </td>
+                                <!-- Status -->
+                                <td class="p-3">
+                                    <span class="px-2 py-1 rounded text-xs"
+                                          :class="{
+                                              'bg-yellow-100 text-yellow-800': item.status === 'pending',
+                                              'bg-blue-100 text-blue-800': item.status === 'in_progress'
+                                          }"
+                                          x-text="item.status.replace('_', ' ')">
+                                    </span>
+                                    <template x-if="item.assigned_to">
+                                        <span class="ml-1 text-xs text-gray-500" x-text="'(' + item.assigned_to + ')'"></span>
+                                    </template>
+                                </td>
+                                <!-- Action -->
+                                <td class="p-3">
+                                    <template x-if="item.status === 'pending'">
+                                        <button @click="claimItem(item)"
+                                                class="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm flex items-center gap-1"
+                                                :disabled="claiming">
+                                            <span x-show="!claiming">Claim</span>
+                                            <span x-show="claiming">...</span>
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                                            </svg>
+                                        </button>
+                                    </template>
+                                    <template x-if="item.status === 'in_progress' && item.assigned_to === currentUser">
+                                        <a :href="'/review/' + item.referral_id + '?queue_item=' + item.id + '&user=' + currentUser"
+                                           class="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 text-sm inline-flex items-center gap-1">
+                                            Continue
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                                            </svg>
+                                        </a>
+                                    </template>
+                                    <template x-if="item.status === 'in_progress' && item.assigned_to !== currentUser">
+                                        <span class="text-gray-400 text-sm">Assigned</span>
+                                    </template>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Help Panel -->
+        <div class="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <h3 class="font-medium text-blue-800 mb-2">How to use this queue:</h3>
+            <ul class="text-sm text-blue-700 space-y-1">
+                <li>1. Click <strong>Claim</strong> on an item to start working on it</li>
+                <li>2. Review and edit the extracted data on the review page</li>
+                <li>3. Add/edit service line items as needed</li>
+                <li>4. Click <strong>Approve</strong> to move to Care Coordination or <strong>Reject</strong> if invalid</li>
+                <li>5. You'll return here automatically after approval/rejection</li>
+            </ul>
+        </div>
+    </main>
+
+    <script>
+        function intakeQueueApp() {
+            return {
+                currentUser: new URLSearchParams(window.location.search).get('user') || 'anonymous',
+                items: [],
+                stats: {},
+                loading: false,
+                claiming: false,
+                priorityFilter: '',
+                overdueOnly: false,
+                autoRefreshCountdown: 30,
+                refreshInterval: null,
+                countdownInterval: null,
+
+                init() {
+                    this.refreshQueue();
+                    this.startAutoRefresh();
+                },
+
+                startAutoRefresh() {
+                    // Countdown timer
+                    this.countdownInterval = setInterval(() => {
+                        this.autoRefreshCountdown--;
+                        if (this.autoRefreshCountdown <= 0) {
+                            this.autoRefreshCountdown = 30;
+                            this.refreshQueue();
+                        }
+                    }, 1000);
+                },
+
+                async refreshQueue() {
+                    this.loading = true;
+                    this.autoRefreshCountdown = 30;
+
+                    try {
+                        // Fetch stats
+                        const statsResp = await fetch('/api/queues/intake/stats');
+                        if (statsResp.ok) {
+                            this.stats = await statsResp.json();
+                        }
+
+                        // Fetch items
+                        let url = '/api/queues/intake/items?limit=50';
+                        if (this.priorityFilter) {
+                            url += '&priority=' + this.priorityFilter;
+                        }
+                        if (this.overdueOnly) {
+                            url += '&overdue_only=true';
+                        }
+
+                        const itemsResp = await fetch(url);
+                        if (itemsResp.ok) {
+                            this.items = await itemsResp.json();
+                        }
+                    } catch (e) {
+                        console.error('Failed to refresh queue:', e);
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                async claimItem(item) {
+                    this.claiming = true;
+                    try {
+                        const resp = await fetch(`/api/queue-items/${item.id}/claim`, {
+                            method: 'POST',
+                            headers: {
+                                'X-User-Id': this.currentUser
+                            }
+                        });
+
+                        if (resp.ok) {
+                            // Redirect to review page
+                            window.location.href = `/review/${item.referral_id}?queue_item=${item.id}&user=${this.currentUser}`;
+                        } else {
+                            const error = await resp.json();
+                            alert('Failed to claim item: ' + (error.detail || 'Unknown error'));
+                            this.refreshQueue();
+                        }
+                    } catch (e) {
+                        alert('Error claiming item: ' + e.message);
+                    } finally {
+                        this.claiming = false;
+                    }
+                },
+
+                formatWaitTime(minutes) {
+                    if (minutes < 60) {
+                        return Math.round(minutes) + 'm';
+                    }
+                    const hours = Math.floor(minutes / 60);
+                    const mins = Math.round(minutes % 60);
+                    return hours + 'h ' + mins + 'm';
+                }
+            };
+        }
+    </script>
+</body>
+</html>

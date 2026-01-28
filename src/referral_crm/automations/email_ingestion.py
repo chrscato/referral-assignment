@@ -1,9 +1,15 @@
 """
 Email ingestion pipeline - fetches emails and creates referrals.
+
+Updated to use the new normalized schema:
+- Creates Email records first
+- Uses WorkflowService for queue management
+- Uses ServiceLineItemParser for line items
 """
 
 import time
 from datetime import datetime, timedelta
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -11,15 +17,29 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from referral_crm.config import get_settings
-from referral_crm.models import session_scope, ReferralStatus, Priority
+from referral_crm.models import (
+    session_scope,
+    Email,
+    EmailStatus,
+    Attachment,
+    ExtractionResult,
+    Referral,
+    ReferralStatus,
+    ReferralLineItem,
+    Priority,
+    DocumentType,
+)
 from referral_crm.services.email_service import EmailService, EmailMessage
 from referral_crm.services.extraction_service import (
     ExtractionService,
     extract_text_from_pdf,
     extract_text_from_image,
 )
-from referral_crm.services.referral_service import ReferralService, CarrierService
+from referral_crm.services.referral_service import CarrierService
 from referral_crm.services.storage_service import get_storage_service
+from referral_crm.services.workflow_service import WorkflowService
+from referral_crm.services.line_item_service import LineItemService
+from referral_crm.services.filemaker_conversion import FieldTransformer
 
 console = Console()
 
@@ -28,14 +48,17 @@ class EmailIngestionPipeline:
     """
     Pipeline for ingesting referral emails.
 
-    Flow:
+    New Flow:
     1. Fetch unread emails from inbox
     2. For each email:
-       a. Check if already processed (by email_id)
-       b. Extract data using LLM
-       c. Create referral record
-       d. Download and process attachments
-       e. Mark email as read (optional)
+       a. Check if already processed (by graph_id)
+       b. Create Email record
+       c. Queue for extraction
+       d. Extract data using LLM
+       e. Create Referral + LineItems
+       f. Queue for intake validation
+       g. Download and process attachments
+       h. Mark email as read (optional)
     """
 
     def __init__(
@@ -82,7 +105,7 @@ class EmailIngestionPipeline:
         # Build filter query
         filter_query = None
         if since_hours:
-            since_date = datetime.utcnow() - timedelta(hours=since_hours)
+            since_date = datetime.utcnow().replace(microsecond=0) - timedelta(hours=since_hours)
             filter_query = f"receivedDateTime ge {since_date.isoformat()}Z"
 
         # Fetch emails
@@ -98,6 +121,7 @@ class EmailIngestionPipeline:
                     folder=self.settings.email_inbox_folder,
                     top=max_emails,
                     filter_query=filter_query,
+                    mailbox=self.settings.shared_mailbox or self.settings.graph_mailbox,
                 )
             except Exception as e:
                 console.print(f"[red]Error fetching emails: {e}[/red]")
@@ -130,48 +154,105 @@ class EmailIngestionPipeline:
 
     def _process_email(self, message: EmailMessage) -> str:
         """
-        Process a single email.
+        Process a single email using the new schema.
 
         Returns:
             "created" if new referral created
             "skipped" if already processed
         """
         with session_scope() as session:
-            referral_service = ReferralService(session)
+            workflow_service = WorkflowService(session)
+            line_item_service = LineItemService(session)
             carrier_service = CarrierService(session)
 
-            # Check if already processed
-            existing = referral_service.get_by_email_id(message.id)
-            if existing:
+            # Check if already processed (by graph_id)
+            existing_email = session.query(Email).filter(
+                Email.graph_id == message.id
+            ).first()
+            if existing_email:
                 return "skipped"
 
             console.print(f"  Processing: {message.subject[:50]}...")
 
-            # Extract data using LLM
-            extraction_data = {}
-            if self.use_llm and self.extraction_service:
-                attachment_texts = []
+            # ================================================================
+            # STEP 1: Create Email record
+            # ================================================================
+            email = Email(
+                graph_id=message.id,
+                internet_message_id=message.internet_message_id,
+                conversation_id=message.conversation_id,
+                web_link=message.web_link,
+                subject=message.subject,
+                from_email=message.from_email,
+                from_name=message.from_name,
+                body_preview=message.body_preview,
+                body_html=message.body_content,
+                has_attachments=message.has_attachments,
+                received_at=message.received_datetime,
+                status=EmailStatus.RECEIVED,
+            )
+            session.add(email)
+            session.flush()  # Get email.id
 
-                # Get attachment texts if enabled
-                if self.extract_attachments and message.has_attachments:
-                    attachment_texts = self._get_attachment_texts(message.id)
-
-                result = self.extraction_service.extract_from_email(
-                    from_email=message.from_email,
-                    subject=message.subject,
-                    body=message.body_content,
-                    attachment_texts=attachment_texts,
+            # ================================================================
+            # STEP 2: Download and save attachments to Email
+            # ================================================================
+            attachment_texts = []
+            if self.extract_attachments and message.has_attachments:
+                attachment_texts = self._save_attachments_to_email(
+                    email, message.id, session
                 )
-                extraction_data = result.to_dict()
+
+            # ================================================================
+            # STEP 3: Queue for extraction and run LLM extraction
+            # ================================================================
+            workflow_service.queue_email_for_extraction(email)
+            workflow_service.start_extraction(email)
+
+            extraction_data = {}
+            extraction_confidence = 0.0
+
+            if self.use_llm and self.extraction_service:
+                try:
+                    start_time = datetime.utcnow()
+                    result = self.extraction_service.extract_from_email(
+                        from_email=message.from_email,
+                        subject=message.subject,
+                        body=message.body_content,
+                        attachment_texts=attachment_texts,
+                    )
+                    extraction_data = result.to_dict()
+                    extraction_confidence = result.get_overall_confidence()
+                    duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+
+                    # Save extraction result
+                    extraction_result = ExtractionResult(
+                        email_id=email.id,
+                        raw_extraction=extraction_data,
+                        overall_confidence=extraction_confidence,
+                        field_confidences={
+                            k: v.get("confidence", 0) for k, v in extraction_data.items()
+                        },
+                        model_used=self.settings.claude_model,
+                        extraction_duration_ms=duration_ms,
+                    )
+                    session.add(extraction_result)
+
+                except Exception as e:
+                    console.print(f"    [yellow]Extraction warning: {e}[/yellow]")
+                    workflow_service.fail_extraction(email, str(e))
+                    return "created"  # Email created but extraction failed
+
+            # ================================================================
+            # STEP 4: Create Referral from extracted data
+            # ================================================================
 
             # Find or create carrier
             carrier_id = None
-            carrier_name_raw = None
-            if extraction_data.get("insurance_carrier"):
-                carrier_name_raw = extraction_data["insurance_carrier"]["value"]
-                if carrier_name_raw:
-                    carrier = carrier_service.find_or_create(carrier_name_raw)
-                    carrier_id = carrier.id
+            carrier_name_raw = self._get_extracted_value(extraction_data, "insurance_carrier")
+            if carrier_name_raw:
+                carrier = carrier_service.find_or_create(carrier_name_raw)
+                carrier_id = carrier.id
 
             # Determine priority
             priority = Priority.MEDIUM
@@ -182,26 +263,52 @@ class EmailIngestionPipeline:
                     pass
 
             # Parse dates
-            claimant_dob = None
-            date_of_injury = None
-            if extraction_data.get("claimant_dob"):
-                dob_str = extraction_data["claimant_dob"]["value"]
-                claimant_dob = self._parse_date(dob_str)
-            if extraction_data.get("date_of_injury"):
-                doi_str = extraction_data["date_of_injury"]["value"]
-                date_of_injury = self._parse_date(doi_str)
+            patient_dob = self._parse_date(
+                self._get_extracted_value(extraction_data, "claimant_dob")
+            )
+            patient_doi = self._parse_date(
+                self._get_extracted_value(extraction_data, "date_of_injury")
+            )
+
+            # Get name components
+            first_name = self._get_extracted_value(extraction_data, "claimant_first_name")
+            last_name = self._get_extracted_value(extraction_data, "claimant_last_name")
+            if not first_name and not last_name:
+                full_name = self._get_extracted_value(extraction_data, "claimant_name")
+                if full_name:
+                    parts = full_name.split(None, 1)
+                    first_name = parts[0] if parts else None
+                    last_name = parts[1] if len(parts) > 1 else None
+
+            # Get address components
+            address_1 = self._get_extracted_value(extraction_data, "claimant_address_1")
+            city = self._get_extracted_value(extraction_data, "claimant_city")
+            state = self._get_extracted_value(extraction_data, "claimant_state")
+            zip_code = self._get_extracted_value(extraction_data, "claimant_zip")
+
+            # Parse full address if components missing
+            if not city:
+                full_address = self._get_extracted_value(extraction_data, "claimant_address")
+                if full_address:
+                    parsed = FieldTransformer.parse_address(full_address)
+                    address_1 = address_1 or parsed.get("address_1")
+                    city = parsed.get("city")
+                    state = FieldTransformer.normalize_state(parsed.get("state", ""))
+                    zip_code = FieldTransformer.normalize_zip(parsed.get("zip", ""))
+
+            # Normalize fields
+            if state:
+                state = FieldTransformer.normalize_state(state)
+            if zip_code:
+                zip_code = FieldTransformer.normalize_zip(zip_code)
+
+            phone = self._get_extracted_value(extraction_data, "claimant_phone")
+            if phone:
+                phone = FieldTransformer.normalize_phone(phone)
 
             # Create referral
-            referral = referral_service.create(
-                # Email metadata
-                email_id=message.id,
-                email_internet_message_id=message.internet_message_id,
-                email_web_link=message.web_link,
-                email_conversation_id=message.conversation_id,
-                email_subject=message.subject,
-                email_body_preview=message.body_preview,
-                email_body_html=message.body_content,
-                received_at=message.received_datetime,
+            referral = Referral(
+                email_id=email.id,
                 # Adjuster info
                 adjuster_name=self._get_extracted_value(extraction_data, "adjuster_name"),
                 adjuster_email=message.from_email,
@@ -211,103 +318,250 @@ class EmailIngestionPipeline:
                 carrier_name_raw=carrier_name_raw,
                 # Claim info
                 claim_number=self._get_extracted_value(extraction_data, "claim_number"),
-                # Claimant info
-                claimant_name=self._get_extracted_value(extraction_data, "claimant_name"),
-                claimant_dob=claimant_dob,
-                claimant_phone=self._get_extracted_value(extraction_data, "claimant_phone"),
-                claimant_address=self._get_extracted_value(extraction_data, "claimant_address"),
-                # Employer
-                employer_name=self._get_extracted_value(extraction_data, "employer_name"),
-                # Injury/Service
-                date_of_injury=date_of_injury,
-                body_parts=self._get_extracted_value(extraction_data, "body_parts"),
-                service_requested=self._get_extracted_value(extraction_data, "service_requested"),
+                jurisdiction_state=self._get_extracted_value(extraction_data, "jurisdiction_state"),
+                order_type=self._get_extracted_value(extraction_data, "order_type"),
                 authorization_number=self._get_extracted_value(extraction_data, "authorization_number"),
-                # Status
-                status=ReferralStatus.PENDING,
+                # Patient demographics
+                patient_first_name=first_name,
+                patient_last_name=last_name,
+                patient_dob=patient_dob,
+                patient_doi=patient_doi,
+                patient_gender=self._get_extracted_value(extraction_data, "claimant_gender"),
+                patient_phone=phone,
+                patient_email=self._get_extracted_value(extraction_data, "claimant_email"),
+                patient_ssn=self._get_extracted_value(extraction_data, "claimant_ssn"),
+                # Patient address
+                patient_address_1=address_1,
+                patient_address_2=self._get_extracted_value(extraction_data, "claimant_address_2"),
+                patient_city=city,
+                patient_state=state,
+                patient_zip=zip_code,
+                # Employer info
+                employer_name=self._get_extracted_value(extraction_data, "employer_name"),
+                employer_job_title=self._get_extracted_value(extraction_data, "claimant_job_title"),
+                employer_address=self._get_extracted_value(extraction_data, "employer_address"),
+                # Referring physician
+                referring_physician_name=self._get_extracted_value(extraction_data, "referring_physician_name"),
+                referring_physician_npi=self._get_extracted_value(extraction_data, "referring_physician_npi"),
+                # Service info (summary - details in line items)
+                service_summary=self._get_extracted_value(extraction_data, "service_requested"),
+                body_parts=self._get_extracted_value(extraction_data, "body_parts"),
+                # Preferences
+                suggested_providers=self._get_extracted_value(extraction_data, "suggested_providers"),
+                special_requirements=self._get_extracted_value(extraction_data, "special_requirements"),
+                # Status & priority
+                status=ReferralStatus.DRAFT,
                 priority=priority,
                 # Extraction metadata
+                extraction_confidence=extraction_confidence,
                 extraction_data=extraction_data,
-                extraction_timestamp=datetime.utcnow(),
+                needs_human_review=extraction_confidence < 0.8,
+                # Timestamps
+                received_at=message.received_datetime,
             )
 
-            # Upload email content and extraction data to S3
-            s3_keys = self._upload_to_s3(
-                referral.id,
-                message,
-                extraction_data,
-                referral_service,
+            # ================================================================
+            # STEP 5: Parse service_requested into line items
+            # ================================================================
+            service_requested = self._get_extracted_value(extraction_data, "service_requested")
+            icd10_code = self._get_extracted_value(extraction_data, "icd10_code")
+            icd10_desc = self._get_extracted_value(extraction_data, "icd10_description")
+
+            line_items = line_item_service.create_line_items_from_extraction(
+                service_requested=service_requested or "",
+                icd10_code=icd10_code,
+                icd10_description=icd10_desc,
+                confidence=extraction_confidence,
             )
 
-            # Update referral with S3 keys
-            if s3_keys:
-                referral_service.update(
-                    referral.id,
-                    user="ingestion",
-                    s3_email_key=s3_keys.get("email_html_key"),
-                    s3_extraction_key=s3_keys.get("extraction_key"),
-                )
+            # If no line items parsed but we have service_requested, create one
+            if not line_items and service_requested:
+                line_items = [
+                    ReferralLineItem(
+                        service_description=service_requested,
+                        icd10_code=icd10_code,
+                        icd10_description=icd10_desc,
+                        confidence=extraction_confidence,
+                        source="extraction",
+                    )
+                ]
 
-            # Download and save attachments (local + S3)
-            if self.extract_attachments and message.has_attachments:
-                self._save_attachments(referral.id, message.id, referral_service)
+            # ================================================================
+            # STEP 6: Complete extraction and queue for intake
+            # ================================================================
+            workflow_service.complete_extraction_and_queue_for_intake(
+                email=email,
+                referral=referral,
+                line_items=line_items,
+            )
 
-            # Mark as read
+            # ================================================================
+            # STEP 7: Upload to S3
+            # ================================================================
+            self._upload_to_s3(email, referral, extraction_data)
+
+            # ================================================================
+            # STEP 8: Mark email as read
+            # ================================================================
             if self.mark_as_read:
                 try:
-                    self.email_service.mark_as_read(message.id)
+                    self.email_service.mark_as_read(
+                        message.id,
+                        mailbox=self.settings.shared_mailbox or self.settings.graph_mailbox,
+                    )
                 except Exception:
                     pass  # Non-critical
 
-            console.print(f"    [green]Created referral #{referral.id}[/green]")
+            console.print(f"    [green]Created referral #{referral.id} with {len(line_items)} line item(s)[/green]")
             return "created"
+
+    def _save_attachments_to_email(
+        self,
+        email: Email,
+        message_id: str,
+        session,
+    ) -> list[str]:
+        """
+        Download and save attachments to the Email record.
+        Returns list of extracted text from documents.
+        """
+        storage = get_storage_service()
+        s3_enabled = storage.is_configured()
+        texts = []
+
+        # Image extensions to skip for text extraction (likely logos)
+        LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg"}
+        LOGO_CONTENT_TYPES = {
+            "image/png", "image/jpeg", "image/gif", "image/bmp",
+            "image/x-icon", "image/webp", "image/svg+xml"
+        }
+
+        try:
+            attachments = self.email_service.get_attachments(
+                message_id,
+                mailbox=self.settings.shared_mailbox or self.settings.graph_mailbox,
+            )
+            attachments_dir = self.settings.attachments_dir / str(email.id)
+            attachments_dir.mkdir(parents=True, exist_ok=True)
+
+            for att in attachments:
+                if att.content_bytes:
+                    filename_lower = att.name.lower()
+                    extension = Path(filename_lower).suffix
+                    is_logo = (
+                        extension in LOGO_EXTENSIONS or
+                        (att.content_type and att.content_type.lower() in LOGO_CONTENT_TYPES)
+                    )
+
+                    # Save locally
+                    filepath = attachments_dir / att.name
+                    filepath.write_bytes(att.content_bytes)
+
+                    # Determine document type and extract text
+                    extracted_text = None
+                    doc_type = None
+
+                    if is_logo:
+                        doc_type = DocumentType.LOGO
+                    elif att.content_type == "application/pdf" or filename_lower.endswith(".pdf"):
+                        extracted_text = extract_text_from_pdf(str(filepath))
+                        doc_type = DocumentType.REFERRAL_FORM
+                        if extracted_text:
+                            texts.append(extracted_text)
+                    elif att.content_type and att.content_type.startswith("image/"):
+                        extracted_text = extract_text_from_image(str(filepath))
+                        doc_type = DocumentType.OTHER
+                        if extracted_text:
+                            texts.append(extracted_text)
+
+                    # Upload to S3 if configured
+                    s3_key = None
+                    s3_text_key = None
+                    if s3_enabled:
+                        try:
+                            s3_result = storage.upload_attachment(
+                                referral_id=email.id,  # Using email.id for now
+                                filename=att.name,
+                                content=att.content_bytes,
+                                content_type=att.content_type,
+                                extracted_text=extracted_text,
+                            )
+                            s3_key = s3_result.get("s3_key")
+                            s3_text_key = s3_result.get("text_s3_key")
+                        except Exception as e:
+                            console.print(f"    [yellow]S3 upload warning: {e}[/yellow]")
+
+                    # Create Attachment record linked to Email
+                    attachment = Attachment(
+                        email_id=email.id,
+                        filename=att.name,
+                        content_type=att.content_type,
+                        size_bytes=att.size,
+                        graph_attachment_id=att.id,
+                        storage_path=str(filepath),
+                        s3_key=s3_key,
+                        s3_text_key=s3_text_key,
+                        document_type=doc_type,
+                        extracted_text=extracted_text,
+                        is_relevant=not is_logo,
+                    )
+                    session.add(attachment)
+
+            if attachments:
+                console.print(f"    [dim]Saved {len(attachments)} attachment(s)[/dim]")
+
+        except Exception as e:
+            console.print(f"    [yellow]Warning: Could not save attachments: {e}[/yellow]")
+
+        return texts
 
     def _upload_to_s3(
         self,
-        referral_id: int,
-        message: EmailMessage,
+        email: Email,
+        referral: Referral,
         extraction_data: dict,
-        referral_service: ReferralService,
-    ) -> Optional[dict]:
+    ) -> None:
         """Upload email and extraction data to S3."""
         storage = get_storage_service()
         if not storage.is_configured():
-            return None
+            return
 
         try:
             # Build email metadata
             email_metadata = {
-                "id": message.id,
-                "subject": message.subject,
-                "from_email": message.from_email,
-                "from_name": message.from_name,
-                "received_datetime": message.received_datetime.isoformat(),
-                "web_link": message.web_link,
-                "internet_message_id": message.internet_message_id,
-                "conversation_id": message.conversation_id,
-                "has_attachments": message.has_attachments,
+                "id": email.graph_id,
+                "subject": email.subject,
+                "from_email": email.from_email,
+                "from_name": email.from_name,
+                "received_datetime": email.received_at.isoformat() if email.received_at else None,
+                "web_link": email.web_link,
+                "internet_message_id": email.internet_message_id,
+                "conversation_id": email.conversation_id,
+                "has_attachments": email.has_attachments,
             }
 
             # Upload email content
             result = storage.upload_email(
-                referral_id,
-                email_html=message.body_content,
+                referral.id,
+                email_html=email.body_html,
                 email_metadata=email_metadata,
             )
 
+            # Update Email with S3 keys
+            email.s3_html_key = result.get("email_html_key")
+
             # Upload extraction data
             if extraction_data:
-                result["extraction_key"] = storage.upload_extraction(
-                    referral_id,
+                extraction_key = storage.upload_extraction(
+                    referral.id,
                     extraction_data,
                 )
+                email.s3_extraction_key = extraction_key
 
             console.print(f"    [dim]Uploaded to S3[/dim]")
-            return result
 
         except Exception as e:
             console.print(f"    [yellow]S3 upload warning: {e}[/yellow]")
-            return None
 
     def _get_extracted_value(self, data: dict, field: str) -> Optional[str]:
         """Get a value from extraction data."""
@@ -323,103 +577,6 @@ class EmailIngestionPipeline:
             return datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
             return None
-
-    def _get_attachment_texts(self, message_id: str) -> list[str]:
-        """Get extracted text from email attachments."""
-        texts = []
-        try:
-            attachments = self.email_service.get_attachments(message_id)
-            for att in attachments:
-                if att.content_bytes:
-                    # Save to temp and extract
-                    temp_dir = Path("/tmp/referral_crm_attachments")
-                    temp_dir.mkdir(exist_ok=True)
-                    temp_path = temp_dir / att.name
-
-                    temp_path.write_bytes(att.content_bytes)
-
-                    # Extract text based on type
-                    if att.content_type == "application/pdf" or att.name.lower().endswith(".pdf"):
-                        text = extract_text_from_pdf(str(temp_path))
-                        if text:
-                            texts.append(text)
-                    elif att.content_type.startswith("image/"):
-                        text = extract_text_from_image(str(temp_path))
-                        if text:
-                            texts.append(text)
-
-                    # Cleanup
-                    temp_path.unlink(missing_ok=True)
-
-        except Exception as e:
-            console.print(f"    [yellow]Warning: Could not extract attachments: {e}[/yellow]")
-
-        return texts
-
-    def _save_attachments(
-        self,
-        referral_id: int,
-        message_id: str,
-        referral_service: ReferralService,
-    ) -> None:
-        """Download and save attachments for a referral (local + S3)."""
-        storage = get_storage_service()
-        s3_enabled = storage.is_configured()
-
-        try:
-            attachments = self.email_service.get_attachments(message_id)
-            attachments_dir = self.settings.attachments_dir / str(referral_id)
-            attachments_dir.mkdir(parents=True, exist_ok=True)
-
-            for att in attachments:
-                if att.content_bytes:
-                    # Save locally
-                    filepath = attachments_dir / att.name
-                    filepath.write_bytes(att.content_bytes)
-
-                    # Extract text for certain types
-                    extracted_text = None
-                    if att.content_type == "application/pdf" or att.name.lower().endswith(".pdf"):
-                        extracted_text = extract_text_from_pdf(str(filepath))
-                    elif att.content_type and att.content_type.startswith("image/"):
-                        extracted_text = extract_text_from_image(str(filepath))
-
-                    # Upload to S3 if configured
-                    s3_key = None
-                    s3_text_key = None
-                    if s3_enabled:
-                        try:
-                            s3_result = storage.upload_attachment(
-                                referral_id=referral_id,
-                                filename=att.name,
-                                content=att.content_bytes,
-                                content_type=att.content_type,
-                                extracted_text=extracted_text,
-                            )
-                            s3_key = s3_result.get("s3_key")
-                            s3_text_key = s3_result.get("text_s3_key")
-                        except Exception as e:
-                            console.print(f"    [yellow]S3 attachment upload warning: {e}[/yellow]")
-
-                    # Add to database with S3 keys
-                    referral_service.add_attachment(
-                        referral_id=referral_id,
-                        filename=att.name,
-                        content_type=att.content_type,
-                        size_bytes=att.size,
-                        storage_path=str(filepath),
-                        graph_attachment_id=att.id,
-                        extracted_text=extracted_text,
-                        s3_key=s3_key,
-                        s3_text_key=s3_text_key,
-                    )
-
-            att_count = len(attachments)
-            if att_count > 0:
-                console.print(f"    [dim]Saved {att_count} attachment(s)[/dim]")
-
-        except Exception as e:
-            console.print(f"    [yellow]Warning: Could not save attachments: {e}[/yellow]")
 
 
 class EmailPoller:

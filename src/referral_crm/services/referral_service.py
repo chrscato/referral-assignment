@@ -1,5 +1,7 @@
 """
 Referral service - Core CRUD operations and business logic.
+
+Updated to work with the new normalized schema.
 """
 
 from __future__ import annotations
@@ -11,10 +13,11 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from referral_crm.models import (
-    Attachment,
     AuditLog,
     Carrier,
+    Email,
     Referral,
+    ReferralLineItem,
     ReferralStatus,
     Priority,
 )
@@ -28,15 +31,13 @@ class ReferralService:
 
     def create(
         self,
-        email_subject: Optional[str] = None,
         adjuster_email: Optional[str] = None,
         **kwargs,
     ) -> Referral:
         """Create a new referral."""
         referral = Referral(
-            email_subject=email_subject,
             adjuster_email=adjuster_email,
-            status=ReferralStatus.PENDING,
+            status=ReferralStatus.DRAFT,
             **kwargs,
         )
         self.session.add(referral)
@@ -52,16 +53,21 @@ class ReferralService:
             self.session.query(Referral)
             .options(
                 joinedload(Referral.carrier),
-                joinedload(Referral.provider),
-                joinedload(Referral.attachments),
+                joinedload(Referral.source_email),
+                joinedload(Referral.line_items),
             )
             .filter(Referral.id == referral_id)
             .first()
         )
 
-    def get_by_email_id(self, email_id: str) -> Optional[Referral]:
-        """Get a referral by its Graph API email ID."""
-        return self.session.query(Referral).filter(Referral.email_id == email_id).first()
+    def get_by_email_graph_id(self, graph_id: str) -> Optional[Referral]:
+        """Get a referral by its source email's Graph API ID."""
+        return (
+            self.session.query(Referral)
+            .join(Email)
+            .filter(Email.graph_id == graph_id)
+            .first()
+        )
 
     def list(
         self,
@@ -77,7 +83,8 @@ class ReferralService:
         """List referrals with optional filtering."""
         query = self.session.query(Referral).options(
             joinedload(Referral.carrier),
-            joinedload(Referral.provider),
+            joinedload(Referral.source_email),
+            joinedload(Referral.line_items),
         )
 
         if status:
@@ -90,10 +97,11 @@ class ReferralService:
             search_term = f"%{search}%"
             query = query.filter(
                 or_(
-                    Referral.claimant_name.ilike(search_term),
+                    Referral.patient_first_name.ilike(search_term),
+                    Referral.patient_last_name.ilike(search_term),
                     Referral.claim_number.ilike(search_term),
                     Referral.adjuster_name.ilike(search_term),
-                    Referral.email_subject.ilike(search_term),
+                    Referral.service_summary.ilike(search_term),
                 )
             )
 
@@ -157,6 +165,10 @@ class ReferralService:
 
         if new_status == ReferralStatus.COMPLETED:
             referral.completed_at = datetime.utcnow()
+        elif new_status == ReferralStatus.VALIDATED:
+            referral.validated_at = datetime.utcnow()
+        elif new_status == ReferralStatus.SCHEDULED:
+            referral.scheduled_at = datetime.utcnow()
 
         self._log_action(
             referral_id,
@@ -172,10 +184,10 @@ class ReferralService:
         self.session.refresh(referral)
         return referral
 
-    def approve(self, referral_id: int, user: str = "system") -> Optional[Referral]:
-        """Move referral to approved status."""
+    def validate(self, referral_id: int, user: str = "system") -> Optional[Referral]:
+        """Move referral to validated status (from intake queue)."""
         return self.update_status(
-            referral_id, ReferralStatus.APPROVED, user, notes="Referral approved"
+            referral_id, ReferralStatus.VALIDATED, user, notes="Referral validated"
         )
 
     def reject(
@@ -201,15 +213,15 @@ class ReferralService:
         self.session.refresh(referral)
         return referral
 
-    def mark_needs_info(
-        self, referral_id: int, info_needed: str, user: str = "system"
+    def mark_on_hold(
+        self, referral_id: int, reason: str, user: str = "system"
     ) -> Optional[Referral]:
-        """Mark a referral as needing additional information."""
+        """Put a referral on hold."""
         referral = self.update(
             referral_id,
             user=user,
-            status=ReferralStatus.NEEDS_INFO,
-            notes=f"Info needed: {info_needed}",
+            status=ReferralStatus.ON_HOLD,
+            notes=f"On hold: {reason}",
         )
         return referral
 
@@ -225,36 +237,14 @@ class ReferralService:
             filemaker_submitted_at=datetime.utcnow(),
         )
 
-    def add_attachment(
-        self,
-        referral_id: int,
-        filename: str,
-        content_type: Optional[str] = None,
-        size_bytes: Optional[int] = None,
-        storage_path: Optional[str] = None,
-        graph_attachment_id: Optional[str] = None,
-        document_type: Optional[str] = None,
-        extracted_text: Optional[str] = None,
-        s3_key: Optional[str] = None,
-        s3_text_key: Optional[str] = None,
-    ) -> Attachment:
-        """Add an attachment to a referral."""
-        attachment = Attachment(
-            referral_id=referral_id,
-            filename=filename,
-            content_type=content_type,
-            size_bytes=size_bytes,
-            storage_path=storage_path,
-            graph_attachment_id=graph_attachment_id,
-            document_type=document_type,
-            extracted_text=extracted_text,
-            s3_key=s3_key,
-            s3_text_key=s3_text_key,
+    def get_line_items(self, referral_id: int) -> list[ReferralLineItem]:
+        """Get all line items for a referral."""
+        return (
+            self.session.query(ReferralLineItem)
+            .filter(ReferralLineItem.referral_id == referral_id)
+            .order_by(ReferralLineItem.line_number)
+            .all()
         )
-        self.session.add(attachment)
-        self.session.commit()
-        self.session.refresh(attachment)
-        return attachment
 
     def get_audit_log(self, referral_id: int) -> list[AuditLog]:
         """Get the audit history for a referral."""
@@ -288,7 +278,7 @@ class ReferralService:
         self.session.add(log)
 
     def delete(self, referral_id: int) -> bool:
-        """Delete a referral (cascade deletes attachments and audit logs)."""
+        """Delete a referral (cascade deletes line items and audit logs)."""
         referral = self.get(referral_id)
         if not referral:
             return False
