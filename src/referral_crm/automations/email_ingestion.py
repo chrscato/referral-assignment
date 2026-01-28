@@ -66,6 +66,7 @@ class EmailIngestionPipeline:
         mark_as_read: bool = True,
         extract_attachments: bool = True,
         use_llm: bool = True,
+        log_callback: Optional[callable] = None,
     ):
         self.settings = get_settings()
         self.email_service = EmailService()
@@ -73,6 +74,19 @@ class EmailIngestionPipeline:
         self.mark_as_read = mark_as_read
         self.extract_attachments = extract_attachments
         self.use_llm = use_llm
+        self.log_callback = log_callback
+
+    def _log(self, message: str):
+        """Log a message to console and callback if available."""
+        # Strip rich markup for callback
+        plain_message = message.replace("[blue]", "").replace("[/blue]", "") \
+                               .replace("[green]", "").replace("[/green]", "") \
+                               .replace("[yellow]", "").replace("[/yellow]", "") \
+                               .replace("[red]", "").replace("[/red]", "") \
+                               .replace("[bold]", "").replace("[/bold]", "")
+        if self.log_callback:
+            self.log_callback(plain_message)
+        console.print(message)
 
     def run(
         self,
@@ -97,10 +111,10 @@ class EmailIngestionPipeline:
         }
 
         if not self.email_service.is_configured():
-            console.print("[yellow]Email service not configured. Skipping ingestion.[/yellow]")
+            self._log("[yellow]Email service not configured. Skipping ingestion.[/yellow]")
             return stats
 
-        console.print("[blue]Starting email ingestion pipeline...[/blue]")
+        self._log("[blue]Starting email ingestion pipeline...[/blue]")
 
         # Build filter query
         filter_query = None
@@ -109,46 +123,42 @@ class EmailIngestionPipeline:
             filter_query = f"receivedDateTime ge {since_date.isoformat()}Z"
 
         # Fetch emails
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Fetching emails...", total=None)
+        self._log("Fetching emails from inbox...")
+        try:
+            messages = self.email_service.list_messages(
+                folder=self.settings.email_inbox_folder,
+                top=max_emails,
+                filter_query=filter_query,
+                mailbox=self.settings.shared_mailbox or self.settings.graph_mailbox,
+            )
+        except Exception as e:
+            self._log(f"[red]Error fetching emails: {e}[/red]")
+            return stats
 
-            try:
-                messages = self.email_service.list_messages(
-                    folder=self.settings.email_inbox_folder,
-                    top=max_emails,
-                    filter_query=filter_query,
-                    mailbox=self.settings.shared_mailbox or self.settings.graph_mailbox,
-                )
-            except Exception as e:
-                console.print(f"[red]Error fetching emails: {e}[/red]")
-                return stats
-
-            progress.update(task, description=f"Found {len(messages)} emails")
+        self._log(f"Found {len(messages)} emails to process")
 
         # Process each email
-        for message in messages:
+        for i, message in enumerate(messages, 1):
             try:
+                self._log(f"[{i}/{len(messages)}] Processing: {message.subject[:60]}...")
                 result = self._process_email(message)
                 stats["processed"] += 1
 
                 if result == "created":
                     stats["created"] += 1
+                    self._log(f"  -> Created new referral")
                 elif result == "skipped":
                     stats["skipped"] += 1
+                    self._log(f"  -> Skipped (already processed)")
 
             except Exception as e:
-                console.print(f"[red]Error processing email {message.id}: {e}[/red]")
+                self._log(f"[red]Error processing email: {e}[/red]")
                 stats["errors"] += 1
 
-        console.print()
-        console.print(f"[green]Ingestion complete:[/green] "
-                      f"{stats['created']} created, "
-                      f"{stats['skipped']} skipped, "
-                      f"{stats['errors']} errors")
+        self._log(f"[green]Ingestion complete:[/green] "
+                  f"{stats['created']} created, "
+                  f"{stats['skipped']} skipped, "
+                  f"{stats['errors']} errors")
 
         return stats
 
@@ -171,8 +181,6 @@ class EmailIngestionPipeline:
             ).first()
             if existing_email:
                 return "skipped"
-
-            console.print(f"  Processing: {message.subject[:50]}...")
 
             # ================================================================
             # STEP 1: Create Email record

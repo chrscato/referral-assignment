@@ -8,10 +8,14 @@ from pathlib import Path
 from typing import Optional
 
 import secrets
+import asyncio
+import queue
+import threading
+import uuid
 from fastapi import FastAPI, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict
@@ -47,6 +51,54 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)) ->
             headers={"WWW-Authenticate": "Basic"},
         )
     return credentials.username
+
+
+# ============================================================================
+# Ingestion Log Streaming
+# ============================================================================
+class IngestionLogCollector:
+    """Collects logs from ingestion process for streaming to client."""
+
+    def __init__(self):
+        self.sessions: dict[str, queue.Queue] = {}
+        self._lock = threading.Lock()
+
+    def create_session(self) -> str:
+        """Create a new log session and return its ID."""
+        session_id = str(uuid.uuid4())[:8]
+        with self._lock:
+            self.sessions[session_id] = queue.Queue()
+        return session_id
+
+    def log(self, session_id: str, message: str):
+        """Add a log message to a session."""
+        with self._lock:
+            if session_id in self.sessions:
+                self.sessions[session_id].put(message)
+
+    def get_logs(self, session_id: str, timeout: float = 1.0) -> Optional[str]:
+        """Get next log message from session (blocking with timeout)."""
+        with self._lock:
+            q = self.sessions.get(session_id)
+        if q is None:
+            return None
+        try:
+            return q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def end_session(self, session_id: str):
+        """Mark session as complete."""
+        self.log(session_id, "[DONE]")
+
+    def cleanup_session(self, session_id: str):
+        """Remove a session."""
+        with self._lock:
+            self.sessions.pop(session_id, None)
+
+
+# Global log collector
+ingestion_logs = IngestionLogCollector()
 
 
 # ============================================================================
@@ -640,18 +692,59 @@ def run_email_ingestion(
     data: IngestionRequest,
     background_tasks: BackgroundTasks,
 ):
-    """Kick off email ingestion in the background."""
+    """Kick off email ingestion in the background with logging."""
+    session_id = ingestion_logs.create_session()
+
     def _run():
         from referral_crm.automations.email_ingestion import EmailIngestionPipeline
 
-        pipeline = EmailIngestionPipeline(
-            mark_as_read=data.mark_as_read,
-            use_llm=data.use_llm,
-        )
-        pipeline.run(max_emails=data.max_emails, since_hours=data.since_hours)
+        def log_callback(msg: str):
+            ingestion_logs.log(session_id, msg)
+
+        try:
+            log_callback(f"Starting ingestion (max={data.max_emails}, hours={data.since_hours})")
+            pipeline = EmailIngestionPipeline(
+                mark_as_read=data.mark_as_read,
+                use_llm=data.use_llm,
+                log_callback=log_callback,
+            )
+            pipeline.run(max_emails=data.max_emails, since_hours=data.since_hours)
+            log_callback("Ingestion complete!")
+        except Exception as e:
+            log_callback(f"ERROR: {str(e)}")
+        finally:
+            ingestion_logs.end_session(session_id)
 
     background_tasks.add_task(_run)
-    return {"status": "started"}
+    return {"status": "started", "session_id": session_id}
+
+
+@app.get("/api/ingest/logs/{session_id}")
+async def stream_ingestion_logs(session_id: str):
+    """Stream ingestion logs via Server-Sent Events."""
+
+    async def event_generator():
+        while True:
+            msg = ingestion_logs.get_logs(session_id, timeout=0.5)
+            if msg == "[DONE]":
+                yield f"data: [DONE]\n\n"
+                ingestion_logs.cleanup_session(session_id)
+                break
+            elif msg:
+                yield f"data: {msg}\n\n"
+            else:
+                # Send keepalive
+                yield ": keepalive\n\n"
+            await asyncio.sleep(0.1)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.delete("/api/referrals/{referral_id}")
@@ -803,7 +896,10 @@ def serve_dashboard():
                     </button>
                 </div>
             </div>
-            <div class="px-4 pb-4 text-sm text-gray-500" id="ingest-status">Ready.</div>
+            <div class="px-4 pb-4">
+                <div id="ingest-status" class="text-sm text-gray-500 mb-2">Ready.</div>
+                <div id="ingest-logs" class="hidden bg-gray-900 text-green-400 font-mono text-xs p-3 rounded max-h-64 overflow-y-auto whitespace-pre-wrap"></div>
+            </div>
         </div>
 
         <div class="bg-white rounded shadow">
@@ -892,10 +988,14 @@ def serve_dashboard():
 
         const ingestButton = document.getElementById('ingest-run');
         const ingestStatus = document.getElementById('ingest-status');
+        const ingestLogs = document.getElementById('ingest-logs');
+
         ingestButton.addEventListener('click', async () => {
             ingestButton.disabled = true;
             ingestButton.classList.add('opacity-60');
             ingestStatus.textContent = 'Starting ingestion...';
+            ingestLogs.classList.remove('hidden');
+            ingestLogs.textContent = '';
 
             const payload = {
                 max_emails: parseInt(document.getElementById('ingest-max').value, 10),
@@ -913,12 +1013,38 @@ def serve_dashboard():
                 if (!resp.ok) {
                     throw new Error('Request failed');
                 }
-                ingestStatus.textContent = 'Ingestion started. Refreshing queue...';
-                htmx.trigger(document.getElementById('stats'), 'refresh');
-                htmx.trigger(document.getElementById('referrals'), 'refresh');
+                const data = await resp.json();
+                const sessionId = data.session_id;
+
+                ingestStatus.textContent = 'Ingestion running...';
+
+                // Connect to SSE for logs
+                const eventSource = new EventSource(`/api/ingest/logs/${sessionId}`);
+
+                eventSource.onmessage = (event) => {
+                    if (event.data === '[DONE]') {
+                        eventSource.close();
+                        ingestStatus.textContent = 'Ingestion complete!';
+                        ingestButton.disabled = false;
+                        ingestButton.classList.remove('opacity-60');
+                        htmx.trigger(document.getElementById('stats'), 'refresh');
+                        htmx.trigger(document.getElementById('referrals'), 'refresh');
+                    } else {
+                        const timestamp = new Date().toLocaleTimeString();
+                        ingestLogs.textContent += `[${timestamp}] ${event.data}\n`;
+                        ingestLogs.scrollTop = ingestLogs.scrollHeight;
+                    }
+                };
+
+                eventSource.onerror = () => {
+                    eventSource.close();
+                    ingestStatus.textContent = 'Connection lost. Check logs above.';
+                    ingestButton.disabled = false;
+                    ingestButton.classList.remove('opacity-60');
+                };
+
             } catch (err) {
                 ingestStatus.textContent = 'Failed to start ingestion. Check server logs.';
-            } finally {
                 ingestButton.disabled = false;
                 ingestButton.classList.remove('opacity-60');
             }
