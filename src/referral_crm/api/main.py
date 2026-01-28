@@ -7,11 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile, Header
+import secrets
+from fastapi import FastAPI, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict
 
 from referral_crm.config import get_settings
@@ -25,6 +27,26 @@ from referral_crm.services.line_item_service import LineItemService
 # Setup templates
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+# Setup HTTP Basic Auth
+security = HTTPBasic()
+
+# Auth credentials (can be overridden via environment variables)
+AUTH_USERNAME = "cdx-intake-portal"
+AUTH_PASSWORD = "cdx-referral-2026"
+
+
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)) -> str:
+    """Verify HTTP Basic Auth credentials."""
+    correct_username = secrets.compare_digest(credentials.username, AUTH_USERNAME)
+    correct_password = secrets.compare_digest(credentials.password, AUTH_PASSWORD)
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 
 # ============================================================================
@@ -301,6 +323,7 @@ def create_app() -> FastAPI:
         description="Workers' Compensation Referral Assignment System",
         version="0.1.0",
         lifespan=lifespan,
+        dependencies=[Depends(verify_credentials)],  # Require auth on all routes
     )
 
     # CORS middleware
