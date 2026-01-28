@@ -36,14 +36,14 @@ fi
 git commit -m "$commit_message" || echo "Nothing to commit"
 CURRENT_BRANCH=$(git branch --show-current)
 
-# Ensure SSH remote
+# Use HTTPS for GitHub (more reliable for Windows)
 LOCAL_REMOTE=$(git remote get-url origin)
-if [[ $LOCAL_REMOTE == https://* ]]; then
-    echo "Switching to SSH remote..."
-    REPO_NAME=$(echo $LOCAL_REMOTE | sed 's|https://github.com/||' | sed 's|\.git||')
-    git remote set-url origin "git@github.com:${REPO_NAME}.git"
+if [[ $LOCAL_REMOTE == git@* ]]; then
+    echo "Switching to HTTPS remote..."
+    REPO_NAME=$(echo $LOCAL_REMOTE | sed 's|git@github.com:||' | sed 's|\.git||')
+    git remote set-url origin "https://github.com/${REPO_NAME}.git"
 fi
-REPO_SSH=$(git remote get-url origin)
+REPO_URL=$(git remote get-url origin)
 
 # Add GitHub to known hosts if needed
 if ! grep -q "github.com" ~/.ssh/known_hosts 2>/dev/null; then

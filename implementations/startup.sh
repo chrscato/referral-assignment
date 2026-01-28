@@ -12,7 +12,7 @@ REMOTE_HOST="159.223.104.254"
 REMOTE_DIR="/srv/referral-crm"
 TMUX_SESSION="referral_crm"
 NGROK_SESSION="ngrok_tunnel"
-NGROK_AUTH_TOKEN="rd_33Dt8pST9x8iMn27Wv6atGGW5cc"
+NGROK_AUTH_TOKEN="2udbmPViKXit4Jyuie6f8si0jqJ_4dB41cVpi8C37LFLefKc4"
 NGROK_DOMAIN="crankly-tindery-vannesa.ngrok-free.dev"
 APP_PORT="8000"
 
@@ -24,14 +24,14 @@ echo ""
 # === STEP 1: Get the Git repository URL ===
 echo "[1/6] Getting repository information..."
 
-# Ensure local remote is using SSH
+# Use HTTPS for GitHub (more reliable for Windows)
 LOCAL_REMOTE=$(git remote get-url origin)
-if [[ $LOCAL_REMOTE == https://* ]]; then
-    echo "Switching local remote from HTTPS to SSH..."
-    REPO_NAME=$(echo $LOCAL_REMOTE | sed 's|https://github.com/||' | sed 's|\.git||')
-    git remote set-url origin "git@github.com:${REPO_NAME}.git"
+if [[ $LOCAL_REMOTE == git@* ]]; then
+    echo "Switching to HTTPS remote..."
+    REPO_NAME=$(echo $LOCAL_REMOTE | sed 's|git@github.com:||' | sed 's|\.git||')
+    git remote set-url origin "https://github.com/${REPO_NAME}.git"
 fi
-REPO_SSH=$(git remote get-url origin)
+REPO_URL=$(git remote get-url origin)
 echo "Repository: $REPO_SSH"
 
 # === STEP 2: Push any local changes first ===

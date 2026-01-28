@@ -15,7 +15,7 @@ Deploy the Referral CRM application to a DigitalOcean VM using:
 | Remote Host | `159.223.104.254` |
 | Remote User | `root` |
 | Remote Directory | `/srv/referral-crm` |
-| ngrok Auth Token | `rd_33Dt8pST9x8iMn27Wv6atGGW5cc` |
+| ngrok Auth Token | `2udbmPViKXit4Jyuie6f8si0jqJ_4dB41cVpi8C37LFLefKc4` |
 | ngrok Domain | `crankly-tindery-vannesa.ngrok-free.dev` |
 | App Port | `8000` |
 | tmux Session | `referral_crm` |
