@@ -64,6 +64,21 @@ else
     echo "WARNING: No .env file found locally"
 fi
 
+# Copy database if it exists and user confirms
+if [ -f "referral_crm.db" ]; then
+    echo ""
+    echo "Local database found (referral_crm.db)."
+    echo "Do you want to copy the local database to production? (y/N)"
+    read -r copy_db
+    if [[ "$copy_db" =~ ^[Yy]$ ]]; then
+        echo "Copying database to production..."
+        scp referral_crm.db $REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR/referral_crm.db.new
+        echo "Database staged for deployment"
+    else
+        echo "Skipping database copy"
+    fi
+fi
+
 # === STEP 3: Backup database on remote ===
 echo ""
 echo "[3/5] Backing up database..."
@@ -104,6 +119,12 @@ fi
 if [ -f ".env.new" ]; then
     mv .env.new .env
     echo ".env updated"
+fi
+
+# Move new database into place if uploaded
+if [ -f "referral_crm.db.new" ]; then
+    mv referral_crm.db.new referral_crm.db
+    echo "Database updated from local copy"
 fi
 EOF
 
