@@ -50,11 +50,13 @@ Run `deploy.sh` locally for code updates.
 
 ### What deploy.sh does:
 1. **Local**: Commits and pushes changes to GitHub
-2. **Remote**: Creates timestamped backup of database
-3. **Remote**: Pulls latest code from GitHub
-4. **Remote**: Copies `.env` from local (preserves secrets)
-5. **Remote**: Updates Python dependencies
-6. **Remote**: Restarts the FastAPI app in tmux
+2. **Local**: Optionally copies local database to production (with prompt)
+3. **Remote**: Creates timestamped backup of database
+4. **Remote**: Pulls latest code from GitHub
+5. **Remote**: Copies `.env` from local (preserves secrets)
+6. **Remote**: Swaps in new database if uploaded
+7. **Remote**: Updates Python dependencies
+8. **Remote**: Restarts the FastAPI app in tmux
 
 ### Usage:
 ```bash
@@ -119,6 +121,17 @@ cd /srv/referral-crm && source .venv/bin/activate && python run.py api
 |---------|-----|
 | Web UI | https://crankly-tindery-vannesa.ngrok-free.dev |
 | API Docs | https://crankly-tindery-vannesa.ngrok-free.dev/docs |
+
+### Authentication
+
+The application is protected with HTTP Basic Auth:
+
+| Field | Value |
+|-------|-------|
+| Username | `cdx-intake-portal` |
+| Password | `cdx-referral-2026` |
+
+Your browser will prompt for these credentials when you first access the site.
 
 ---
 
